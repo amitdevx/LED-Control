@@ -203,17 +203,6 @@ impl ConnectionPanelHandle {
                 self.connect_btn.set_sensitive(false);
                 self.disconnect_btn.set_sensitive(true);
             }
-            ConnectionState::DeviceFound(name) => {
-                self.status_icon.set_text("");
-                self.status_icon.add_css_class("disconnected");
-                self.status_label.set_text(&format!("Found: {name}"));
-                self.spinner.set_visible(false);
-                self.spinner.set_spinning(false);
-                self.scan_btn.set_sensitive(true);
-                self.connect_btn
-                    .set_sensitive(self.device_list.selected_row().is_some());
-                self.disconnect_btn.set_sensitive(false);
-            }
             ConnectionState::DiscoveringServices(name) => {
                 self.status_icon.set_text("");
                 self.status_icon.add_css_class("connecting");
@@ -258,6 +247,9 @@ impl ConnectionPanelHandle {
                 return;
             }
         }
+
+        self.status_label
+            .set_text(&format!("Scanning... found {}", device.name));
 
         let row = ListBoxRow::new();
         let row_box = Box::new(Orientation::Horizontal, 8);

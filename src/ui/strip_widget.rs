@@ -331,13 +331,20 @@ fn draw_smd_strip(cr: &cairo::Context, width: f64, height: f64, state: &StripSta
     );
     cr.set_font_size(9.5);
     cr.move_to(ribbon_margin + 16.0, 13.0);
-    let hw_sync = if state.physical_connected {
-        "HARDWARE SYNCED"
+    let hw_status = if state.physical_connected {
+        "HARDWARE UNVERIFIED"
     } else {
-        "LOCAL PREVIEW (DISCONNECTED)"
+        "LOCAL PREVIEW ONLY"
     };
     let pwr_text = if is_pwr { "POWER ON" } else { "STANDBY" };
-    let status_str = format!("{} | {} | {}", state.connection_status, pwr_text, hw_sync);
+    let status_str = if state.last_command_status != "None" {
+        format!(
+            "{} | {} | {} | CMD: {}",
+            state.connection_status, pwr_text, hw_status, state.last_command_status
+        )
+    } else {
+        format!("{} | {} | {}", state.connection_status, pwr_text, hw_status)
+    };
     let _ = cr.show_text(&status_str);
 }
 

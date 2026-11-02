@@ -454,12 +454,6 @@ fn build_ui(app: &Application) {
                             s.physical_connected = false;
                             s.connection_status = "SCANNING".into();
                         }
-                        ConnectionState::DeviceFound(name) => {
-                            is_conn_event.set(false);
-                            let mut s = strip_state_event.borrow_mut();
-                            s.physical_connected = false;
-                            s.connection_status = format!("DEVICE FOUND: {name}");
-                        }
                         ConnectionState::Disconnected => {
                             is_conn_event.set(false);
                             let mut s = strip_state_event.borrow_mut();
@@ -481,14 +475,19 @@ fn build_ui(app: &Application) {
                     conn_h.add_device(device);
                 }
                 BleEvent::ScanComplete => {}
-                BleEvent::CommandSent => {
-                    strip_state_event.borrow_mut().last_command_status = "Acknowledged".into();
+                BleEvent::CommandSent { with_response } => {
+                    let mut s = strip_state_event.borrow_mut();
+                    s.last_command_status = if with_response {
+                        "GATT acknowledged (with response)".to_string()
+                    } else {
+                        "Sent (without response)".to_string()
+                    };
                 }
                 BleEvent::CommandFailed(err) => {
                     log::error!("Command failed: {err}");
                     let mut s = strip_state_event.borrow_mut();
                     s.last_command_status = format!("Failed: {err}");
-                    s.connection_status = format!("COMMAND FAILED: {err}");
+                    // ponytail: Do not overwrite s.connection_status; link status is decoupled from command writes
                 }
             }
         }

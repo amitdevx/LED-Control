@@ -70,13 +70,23 @@ pub fn create_music_panel(
     mic_status_label.set_halign(gtk::Align::Start);
     mic_status_label.set_visible(false);
 
+    let is_internal_update = Rc::new(std::cell::Cell::new(false));
     let engine_mic = music_engine.clone();
     let status_lbl_clone = mic_status_label.clone();
+    let is_internal_toggle = is_internal_update.clone();
+
     mic_check.connect_toggled(move |btn| {
+        if is_internal_toggle.get() {
+            return;
+        }
+
         let active = btn.is_active();
         engine_mic.borrow_mut().set_use_live_mic(active);
-        let eng = engine_mic.borrow();
-        match eng.capture_status() {
+
+        // ponytail: Scope the borrow to drop it before touching widget states
+        let status = engine_mic.borrow().capture_status();
+
+        match status {
             CaptureStatus::Active => {
                 status_lbl_clone.set_text("Live audio capture active");
                 status_lbl_clone.remove_css_class("error");
@@ -86,7 +96,9 @@ pub fn create_music_panel(
                 status_lbl_clone.set_text(&format!("Capture error: {}", err));
                 status_lbl_clone.add_css_class("error");
                 status_lbl_clone.set_visible(true);
+                is_internal_toggle.set(true);
                 btn.set_active(false);
+                is_internal_toggle.set(false);
             }
             CaptureStatus::Inactive => {
                 status_lbl_clone.set_visible(false);
@@ -165,17 +177,25 @@ pub fn create_music_panel(
     let engine_vu = music_engine.clone();
     let status_lbl_timer = mic_status_label.clone();
     let mic_check_timer = mic_check.clone();
+    let is_internal_timer = is_internal_update.clone();
+
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-        let eng = engine_vu.borrow();
+        // ponytail: Scope borrow to local variables so RefCell is not held during widget updates
+        let (status, energy) = {
+            let eng = engine_vu.borrow();
+            (eng.capture_status(), eng.current_energy())
+        };
+
         if mic_check_timer.is_active() {
-            if let CaptureStatus::Failed(err) = eng.capture_status() {
+            if let CaptureStatus::Failed(ref err) = status {
                 status_lbl_timer.set_text(&format!("Capture error: {}", err));
                 status_lbl_timer.add_css_class("error");
                 status_lbl_timer.set_visible(true);
+                is_internal_timer.set(true);
                 mic_check_timer.set_active(false);
+                is_internal_timer.set(false);
             }
         }
-        let energy = eng.current_energy();
         prog_ref.set_fraction(energy);
         gtk::glib::ControlFlow::Continue
     });

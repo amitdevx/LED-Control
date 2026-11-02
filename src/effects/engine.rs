@@ -143,6 +143,12 @@ impl EffectEngine {
     pub fn set_effect(&mut self, effect: Effect) {
         self.effect = effect;
         self.time = 0.0;
+        if effect == Effect::Static {
+            let br = self.params.brightness;
+            self.current_r = self.params.base_r as f64 * br;
+            self.current_g = self.params.base_g as f64 * br;
+            self.current_b = self.params.base_b as f64 * br;
+        }
     }
 
     pub fn effect(&self) -> Effect {
@@ -211,23 +217,15 @@ impl EffectEngine {
     }
 
     /// Compute visual preview segments for the local GTK canvas.
-    /// Whole-strip effects display uniform segments matching physical output.
+    /// Whole-strip effects display uniform segments matching exact physical output
+    /// (including brightness multiplier, power budget limiter, and soft-start slew rate).
     pub fn compute_preview_segments<const N: usize>(&self) -> [(f64, f64, f64); N] {
+        let norm_color = (
+            (self.current_r / 255.0).clamp(0.0, 1.0),
+            (self.current_g / 255.0).clamp(0.0, 1.0),
+            (self.current_b / 255.0).clamp(0.0, 1.0),
+        );
         let mut output = [(0.0, 0.0, 0.0); N];
-        let (wr, wg, wb) = match self.effect {
-            Effect::Static => (self.params.base_r, self.params.base_g, self.params.base_b),
-            Effect::HueCycle => self.compute_hue_cycle(),
-            Effect::Breathing => self.compute_breathing(),
-            Effect::Strobe => self.compute_strobe(),
-            Effect::WarmFade => self.compute_warm_fade(),
-            Effect::CoolFade => self.compute_cool_fade(),
-            Effect::RainbowJump => self.compute_rainbow_jump(),
-            Effect::CandleFlicker => self.compute_candle_flicker(),
-            Effect::CrossFade => self.compute_cross_fade(),
-            Effect::HardwarePattern(idx) => self.simulate_hardware_pattern(idx),
-        };
-
-        let norm_color = (wr as f64 / 255.0, wg as f64 / 255.0, wb as f64 / 255.0);
         output.fill(norm_color);
         output
     }
