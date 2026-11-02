@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+**/*.rs.bk
+
+# Audit and diagnostic reports
+AUDIT.md
+[aA][uU][dD][iI][tT]*.md
+*audit*
+*.log
+
+# Editor and OS files
+.DS_Store
+*.swp
+*~
