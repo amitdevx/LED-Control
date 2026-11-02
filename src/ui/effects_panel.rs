@@ -105,40 +105,44 @@ pub fn create_effects_panel(
         (
             "Fade & Breathe",
             vec![
-                (1, "Red Fade"),
-                (2, "Green Fade"),
-                (3, "Blue Fade"),
-                (4, "Yellow Fade"),
-                (5, "Cyan Fade"),
-                (6, "Purple Fade"),
-                (7, "White Fade"),
-                (8, "7-Color Fade"),
+                (1, "Pattern 1 (unverified Red Fade)"),
+                (2, "Pattern 2 (unverified Green Fade)"),
+                (3, "Pattern 3 (unverified Blue Fade)"),
+                (4, "Pattern 4 (unverified Yellow Fade)"),
+                (5, "Pattern 5 (unverified Cyan Fade)"),
+                (6, "Pattern 6 (unverified Purple Fade)"),
+                (7, "Pattern 7 (unverified White Fade)"),
+                (8, "Pattern 8 (unverified 7-Color Fade)"),
             ],
         ),
         (
             "Jump & Snap",
-            vec![(9, "3-Color Jump"), (10, "7-Color Jump"), (11, "RGB Jump")],
+            vec![
+                (9, "Pattern 9 (unverified 3-Color Jump)"),
+                (10, "Pattern 10 (unverified 7-Color Jump)"),
+                (11, "Pattern 11 (unverified RGB Jump)"),
+            ],
         ),
         (
             "Strobe Flash",
             vec![
-                (12, "Red Strobe"),
-                (13, "Green Strobe"),
-                (14, "Blue Strobe"),
-                (15, "Yellow Strobe"),
-                (16, "Cyan Strobe"),
-                (17, "Magenta Strobe"),
-                (18, "White Strobe"),
+                (12, "Pattern 12 (unverified Red Strobe)"),
+                (13, "Pattern 13 (unverified Green Strobe)"),
+                (14, "Pattern 14 (unverified Blue Strobe)"),
+                (15, "Pattern 15 (unverified Yellow Strobe)"),
+                (16, "Pattern 16 (unverified Cyan Strobe)"),
+                (17, "Pattern 17 (unverified Magenta Strobe)"),
+                (18, "Pattern 18 (unverified White Strobe)"),
             ],
         ),
         (
             "Chase & Stream",
             vec![
-                (20, "Rainbow Chase"),
-                (25, "Pastel Stream"),
-                (30, "Fire Chase"),
-                (40, "Cyan Meteor"),
-                (45, "Comet Flow"),
+                (20, "Pattern 20 (unverified Rainbow Chase)"),
+                (25, "Pattern 25 (unverified Pastel Stream)"),
+                (30, "Pattern 30 (unverified Fire Chase)"),
+                (40, "Pattern 40 (unverified Cyan Meteor)"),
+                (45, "Pattern 45 (unverified Comet Flow)"),
             ],
         ),
     ];
@@ -186,7 +190,7 @@ pub fn create_effects_panel(
     // Custom pattern index entry
     let custom_row = Box::new(Orientation::Horizontal, 8);
     custom_row.set_margin_top(8);
-    let custom_label = Label::new(Some("Custom Pattern ID:"));
+    let custom_label = Label::new(Some("Custom controller pattern ID (0-210):"));
     custom_label.add_css_class("dim-label");
     let custom_entry = gtk::Entry::new();
     custom_entry.set_placeholder_text(Some("0-210"));

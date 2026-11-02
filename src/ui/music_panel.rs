@@ -163,8 +163,18 @@ pub fn create_music_panel(
     // Update VU meter bar on tick using current_energy without double-ticking
     let prog_ref = progress.clone();
     let engine_vu = music_engine.clone();
+    let status_lbl_timer = mic_status_label.clone();
+    let mic_check_timer = mic_check.clone();
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
         let eng = engine_vu.borrow();
+        if mic_check_timer.is_active() {
+            if let CaptureStatus::Failed(err) = eng.capture_status() {
+                status_lbl_timer.set_text(&format!("Capture error: {}", err));
+                status_lbl_timer.add_css_class("error");
+                status_lbl_timer.set_visible(true);
+                mic_check_timer.set_active(false);
+            }
+        }
         let energy = eng.current_energy();
         prog_ref.set_fraction(energy);
         gtk::glib::ControlFlow::Continue

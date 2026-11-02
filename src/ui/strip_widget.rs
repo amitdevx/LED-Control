@@ -22,7 +22,16 @@ pub struct StripState {
     pub r: f64,
     pub g: f64,
     pub b: f64,
-    /// Whether the strip is powered on.
+    /// Desired power state set by the user.
+    pub desired_power: bool,
+    /// Physical link state to the hardware controller.
+    pub physical_connected: bool,
+    /// Last acknowledged command status description.
+    pub last_command_status: String,
+    /// Simulator active state (whether local canvas preview is active).
+    #[allow(dead_code)]
+    pub simulator_active: bool,
+    /// Backward-compatible alias for desired_power.
     pub powered: bool,
     /// Master brightness (0.0 to 1.0).
     pub brightness: f64,
@@ -43,12 +52,16 @@ impl Default for StripState {
             r: initial_color.0,
             g: initial_color.1,
             b: initial_color.2,
-            powered: true, // Default to powered ON so simulator is active immediately
+            desired_power: false,
+            physical_connected: false,
+            last_command_status: "None".into(),
+            simulator_active: true,
+            powered: false, // Default to unpowered until explicit user activation or config load
             brightness: 1.0,
             phase: 0.0,
             effect_active: false,
-            connection_status: "Simulator Preview (Disconnected)".into(),
-            led_colors: [initial_color; SMD_COUNT],
+            connection_status: "Disconnected".into(),
+            led_colors: [(0.0, 0.0, 0.0); SMD_COUNT],
         }
     }
 }
@@ -297,11 +310,13 @@ fn draw_smd_strip(cr: &cairo::Context, width: f64, height: f64, state: &StripSta
     }
 
     // Status indicator badge in top left corner
-    let is_pwr = state.powered;
-    let dot_color = if is_pwr {
-        (0.06, 0.85, 0.45) // Active bright green
+    let is_pwr = state.desired_power || state.powered;
+    let dot_color = if state.physical_connected && is_pwr {
+        (0.06, 0.85, 0.45) // Active bright green (hardware link connected and powered)
+    } else if is_pwr {
+        (0.20, 0.60, 0.95) // Active blue (local desktop simulator preview only)
     } else {
-        (0.65, 0.45, 0.15) // Standby amber
+        (0.65, 0.45, 0.15) // Standby amber (powered off)
     };
 
     cr.arc(ribbon_margin + 8.0, 10.0, 3.5, 0.0, PI * 2.0);
@@ -316,11 +331,13 @@ fn draw_smd_strip(cr: &cairo::Context, width: f64, height: f64, state: &StripSta
     );
     cr.set_font_size(9.5);
     cr.move_to(ribbon_margin + 16.0, 13.0);
-    let status_str = if is_pwr {
-        format!("{} | POWER ON", state.connection_status)
+    let hw_sync = if state.physical_connected {
+        "HARDWARE SYNCED"
     } else {
-        format!("{} | STANDBY", state.connection_status)
+        "LOCAL PREVIEW (DISCONNECTED)"
     };
+    let pwr_text = if is_pwr { "POWER ON" } else { "STANDBY" };
+    let status_str = format!("{} | {} | {}", state.connection_status, pwr_text, hw_sync);
     let _ = cr.show_text(&status_str);
 }
 

@@ -25,7 +25,7 @@ impl Default for AppConfig {
             color_g: 0,
             color_b: 128,
             brightness: 100,
-            powered: true,
+            powered: false, // Default to standby (unpowered) until user activates
             color_order: "RBG".to_string(), // Default One94Store channel order
             effect_name: "Static".to_string(),
             hardware_pattern: None,

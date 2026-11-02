@@ -36,6 +36,7 @@ pub enum ConnectionState {
     Connecting(String),
     DiscoveringServices(String),
     Ready(String),
+    #[allow(dead_code)]
     SendingCommand(String),
     Reconnecting(String, u8),
     Error(String),
@@ -581,6 +582,11 @@ impl BleWorker {
                     continue;
                 }
 
+                // ponytail: Choose WriteMode based on characteristic flags.
+                // Write-without-response is preferred for low-latency streaming (effects, music),
+                // while WriteWithResponse is used as a fallback if the peripheral requires it.
+                // Note: GATT write acknowledgment confirms reception by the controller Bluetooth MCU,
+                // not physical LED luminescence which depends on MCU execution and strip power.
                 let write_mode = if flags.write_without_response {
                     WriteMode::WithoutResponse
                 } else if flags.write {
@@ -649,18 +655,6 @@ impl BleWorker {
             }
         };
 
-        let device = self.device.clone();
-        let name = match device {
-            Some(device) => device
-                .name()
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "controller".into()),
-            None => "controller".into(),
-        };
-        self.emit_state(ConnectionState::SendingCommand(name));
-
         let request = CharacteristicWriteRequest {
             op_type: match write_mode {
                 WriteMode::WithResponse => WriteOp::Request,
@@ -679,8 +673,6 @@ impl BleWorker {
                             .internal_tx
                             .send(WorkerEvent::ConnectionLost(self.connection_generation))
                             .await;
-                    } else if let Some(name) = device.name().await.ok().flatten() {
-                        self.emit_state(ConnectionState::Ready(name));
                     }
                 }
             }

@@ -57,6 +57,7 @@ pub struct MusicEngine {
     bpm: f64,         // 40.0 to 240.0
     use_live_mic: bool,
     capture_status: CaptureStatus,
+    capture_error: Arc<Mutex<Option<String>>>,
     time: f64,
     color_index: usize,
     audio_energy: Arc<Mutex<f64>>,
@@ -72,6 +73,7 @@ impl MusicEngine {
             bpm: 128.0,
             use_live_mic: false,
             capture_status: CaptureStatus::Inactive,
+            capture_error: Arc::new(Mutex::new(None)),
             time: 0.0,
             color_index: 0,
             audio_energy: Arc::new(Mutex::new(0.0)),
@@ -124,8 +126,13 @@ impl MusicEngine {
         self.use_live_mic
     }
 
-    pub fn capture_status(&self) -> &CaptureStatus {
-        &self.capture_status
+    pub fn capture_status(&self) -> CaptureStatus {
+        if let Ok(slot) = self.capture_error.lock() {
+            if let Some(ref err) = *slot {
+                return CaptureStatus::Failed(err.clone());
+            }
+        }
+        self.capture_status.clone()
     }
 
     /// Read current instantaneous energy level (0.0 to 1.0) without advancing time or state.
@@ -209,9 +216,13 @@ impl MusicEngine {
     fn start_audio_capture(&mut self) {
         self.stop_audio_capture();
         self.audio_active.store(true, Ordering::SeqCst);
+        if let Ok(mut slot) = self.capture_error.lock() {
+            *slot = None;
+        }
 
         let energy_clone = self.audio_energy.clone();
         let active_clone = self.audio_active.clone();
+        let error_clone = self.capture_error.clone();
 
         // ponytail: Spawn parec in a background thread to read raw 16-bit PCM samples
         let child = ProcessCommand::new("parec")
@@ -246,7 +257,17 @@ impl MusicEngine {
                                         }
                                     }
                                 }
-                                _ => break,
+                                _ => {
+                                    if active_clone.load(Ordering::SeqCst) {
+                                        if let Ok(mut slot) = error_clone.lock() {
+                                            *slot = Some(
+                                                "Audio stream ended unexpectedly (parec exited)"
+                                                    .to_string(),
+                                            );
+                                        }
+                                    }
+                                    break;
+                                }
                             }
                         }
                     });
@@ -268,6 +289,9 @@ impl MusicEngine {
 
     fn stop_audio_capture(&mut self) {
         self.audio_active.store(false, Ordering::SeqCst);
+        if let Ok(mut slot) = self.capture_error.lock() {
+            *slot = None;
+        }
         if let Some(mut child) = self.child_process.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -343,6 +367,6 @@ mod tests {
     #[test]
     fn test_capture_status_default() {
         let engine = MusicEngine::new();
-        assert_eq!(*engine.capture_status(), CaptureStatus::Inactive);
+        assert_eq!(engine.capture_status(), CaptureStatus::Inactive);
     }
 }

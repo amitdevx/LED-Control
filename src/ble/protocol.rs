@@ -38,22 +38,27 @@ impl ColorOrder {
         }
     }
 
-    /// Parse a color order string strictly. Returns None if unrecognised.
-    pub fn from_str_name(s: &str) -> Option<Self> {
+    /// Parse a color order string strictly. Returns Err if unsupported.
+    pub fn parse(s: &str) -> Result<Self, String> {
         let clean = s
             .split_whitespace()
             .next()
             .unwrap_or("")
             .to_ascii_uppercase();
         match clean.as_str() {
-            "RGB" => Some(ColorOrder::Rgb),
-            "RBG" => Some(ColorOrder::Rbg),
-            "GRB" => Some(ColorOrder::Grb),
-            "GBR" => Some(ColorOrder::Gbr),
-            "BRG" => Some(ColorOrder::Brg),
-            "BGR" => Some(ColorOrder::Bgr),
-            _ => None,
+            "RGB" => Ok(ColorOrder::Rgb),
+            "RBG" => Ok(ColorOrder::Rbg),
+            "GRB" => Ok(ColorOrder::Grb),
+            "GBR" => Ok(ColorOrder::Gbr),
+            "BRG" => Ok(ColorOrder::Brg),
+            "BGR" => Ok(ColorOrder::Bgr),
+            _ => Err(format!("Unsupported color order: {s}")),
         }
+    }
+
+    /// Parse a color order string strictly. Returns None if unrecognised.
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        Self::parse(s).ok()
     }
 
     pub fn all() -> &'static [ColorOrder] {
@@ -153,18 +158,21 @@ mod tests {
 
     #[test]
     fn test_color_order_parsing() {
-        assert_eq!(ColorOrder::from_str_name("rgb"), Some(ColorOrder::Rgb));
-        assert_eq!(ColorOrder::from_str_name("RBG"), Some(ColorOrder::Rbg));
+        assert_eq!(ColorOrder::parse("rgb"), Ok(ColorOrder::Rgb));
+        assert_eq!(ColorOrder::parse("RBG"), Ok(ColorOrder::Rbg));
         assert_eq!(
-            ColorOrder::from_str_name("RBG (One94Store Default)"),
-            Some(ColorOrder::Rbg)
+            ColorOrder::parse("RBG (One94Store Default)"),
+            Ok(ColorOrder::Rbg)
         );
-        assert_eq!(ColorOrder::from_str_name("grb"), Some(ColorOrder::Grb));
-        assert_eq!(ColorOrder::from_str_name("GBR"), Some(ColorOrder::Gbr));
-        assert_eq!(ColorOrder::from_str_name("brg"), Some(ColorOrder::Brg));
-        assert_eq!(ColorOrder::from_str_name("BGR"), Some(ColorOrder::Bgr));
+        assert_eq!(ColorOrder::parse("grb"), Ok(ColorOrder::Grb));
+        assert_eq!(ColorOrder::parse("GBR"), Ok(ColorOrder::Gbr));
+        assert_eq!(ColorOrder::parse("brg"), Ok(ColorOrder::Brg));
+        assert_eq!(ColorOrder::parse("BGR"), Ok(ColorOrder::Bgr));
+        assert!(ColorOrder::parse("invalid").is_err());
+        assert!(ColorOrder::parse("").is_err());
+
+        assert_eq!(ColorOrder::from_str_name("rgb"), Some(ColorOrder::Rgb));
         assert_eq!(ColorOrder::from_str_name("invalid"), None);
-        assert_eq!(ColorOrder::from_str_name(""), None);
     }
 
     #[test]

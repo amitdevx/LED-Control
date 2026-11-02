@@ -93,7 +93,9 @@ fn build_ui(app: &Application) {
     let (strip_widget, strip_state) = ui::create_strip_widget();
     {
         let mut s = strip_state.borrow_mut();
+        s.desired_power = cfg_init.powered;
         s.powered = cfg_init.powered;
+        s.physical_connected = false;
         s.brightness = cfg_init.brightness as f64 / 100.0;
         s.set_all_leds(
             cfg_init.color_r as f64 / 255.0,
@@ -153,7 +155,12 @@ fn build_ui(app: &Application) {
                 power_btn.set_label("Power: ON");
                 power_btn.remove_css_class("power-off-btn");
                 power_btn.add_css_class("power-on-btn");
-                strip.borrow_mut().powered = true;
+                {
+                    let mut s = strip.borrow_mut();
+                    s.desired_power = true;
+                    s.powered = true;
+                    s.physical_connected = is_conn.get();
+                }
                 cfg.borrow_mut().powered = true;
                 let _ = cfg.borrow().save();
                 if is_conn.get() {
@@ -278,6 +285,10 @@ fn build_ui(app: &Application) {
 
                     if is_conn.get() {
                         ble.try_send(BleMessage::SendCommand(Command::Pattern(idx)));
+                    } else {
+                        log::info!(
+                            "Hardware pattern {idx} selected in local preview; will transmit to strip once BLE connects"
+                        );
                     }
                 }
             }
@@ -343,7 +354,12 @@ fn build_ui(app: &Application) {
     power_btn.connect_clicked(move |_| {
         let new_power = !powered_cell.get();
         powered_cell.set(new_power);
-        strip_state_power.borrow_mut().powered = new_power;
+        {
+            let mut s = strip_state_power.borrow_mut();
+            s.desired_power = new_power;
+            s.powered = new_power;
+            s.physical_connected = is_connected_pwr.get();
+        }
 
         {
             let mut c = cfg_pwr.borrow_mut();
@@ -384,8 +400,11 @@ fn build_ui(app: &Application) {
                         ConnectionState::Ready(name) => {
                             let was_connected = is_conn_event.get();
                             is_conn_event.set(true);
-                            strip_state_event.borrow_mut().connection_status =
-                                format!("READY: {name}");
+                            {
+                                let mut s = strip_state_event.borrow_mut();
+                                s.physical_connected = true;
+                                s.connection_status = format!("READY: {name}");
+                            }
                             if !was_connected {
                                 let desired = config.borrow().clone();
                                 let power_command = if desired.powered {
@@ -414,40 +433,44 @@ fn build_ui(app: &Application) {
                                 }
                             }
                         }
-                        ConnectionState::SendingCommand(name) => {
-                            is_conn_event.set(true);
-                            strip_state_event.borrow_mut().connection_status =
-                                format!("SENDING: {name}");
-                        }
+                        ConnectionState::SendingCommand(_) => {}
                         ConnectionState::Connecting(name)
                         | ConnectionState::DiscoveringServices(name) => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status =
-                                format!("CONNECTING: {name}");
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status = format!("CONNECTING: {name}");
                         }
                         ConnectionState::Reconnecting(name, attempt) => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status =
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status =
                                 format!("RECONNECTING: {name} (attempt {attempt})");
                         }
                         ConnectionState::Scanning => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status = "SCANNING".into();
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status = "SCANNING".into();
                         }
                         ConnectionState::DeviceFound(name) => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status =
-                                format!("DEVICE FOUND: {name}");
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status = format!("DEVICE FOUND: {name}");
                         }
                         ConnectionState::Disconnected => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status =
-                                "DISCONNECTED".into();
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status = "DISCONNECTED".into();
                         }
                         ConnectionState::Error(message) => {
                             is_conn_event.set(false);
-                            strip_state_event.borrow_mut().connection_status =
-                                format!("BLE ERROR: {message}");
+                            let mut s = strip_state_event.borrow_mut();
+                            s.physical_connected = false;
+                            s.connection_status = format!("BLE ERROR: {message}");
                         }
                     }
                     conn_h.set_state(&state);
@@ -458,11 +481,14 @@ fn build_ui(app: &Application) {
                     conn_h.add_device(device);
                 }
                 BleEvent::ScanComplete => {}
-                BleEvent::CommandSent => {}
+                BleEvent::CommandSent => {
+                    strip_state_event.borrow_mut().last_command_status = "Acknowledged".into();
+                }
                 BleEvent::CommandFailed(err) => {
                     log::error!("Command failed: {err}");
-                    strip_state_event.borrow_mut().connection_status =
-                        format!("COMMAND FAILED: {err}");
+                    let mut s = strip_state_event.borrow_mut();
+                    s.last_command_status = format!("Failed: {err}");
+                    s.connection_status = format!("COMMAND FAILED: {err}");
                 }
             }
         }
