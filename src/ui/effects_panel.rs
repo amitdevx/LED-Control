@@ -84,14 +84,15 @@ pub fn create_effects_panel(
     container.append(&brightness_row);
 
     // Hardware patterns section
-    let hw_label = Label::new(Some("Hardware Controller Patterns"));
+    let hw_label = Label::new(Some("Hardware Controller Patterns (Unverified)"));
     hw_label.add_css_class("section-label");
     hw_label.set_halign(gtk::Align::Start);
     hw_label.set_margin_top(12);
     container.append(&hw_label);
 
     let hw_desc = Label::new(Some(
-        "Runs directly on the LED strip controller microchip (indexes 0-210). \
+        "Runs on the physical LED strip controller microchip (indices 0-210). \
+         Pattern names are approximate reference mappings pending physical verification. \
          Continues running even after closing the desktop app.",
     ));
     hw_desc.add_css_class("dim-label");

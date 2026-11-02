@@ -40,7 +40,7 @@ fn build_ui(app: &Application) {
 
     // Load persisted user configuration
     let config = Rc::new(RefCell::new(AppConfig::load()));
-    config.borrow().save();
+    let _ = config.borrow().save();
 
     // Set up standard mpsc channel for worker -> UI communication
     let (event_tx, event_rx) = std::sync::mpsc::channel::<BleEvent>();
@@ -129,7 +129,13 @@ fn build_ui(app: &Application) {
     }
 
     // Configure initial BLE parameters
-    let initial_order = ColorOrder::from_str_name(&cfg_init.color_order);
+    let initial_order = ColorOrder::from_str_name(&cfg_init.color_order).unwrap_or_else(|| {
+        log::warn!(
+            "Unrecognized color order '{}' in config, falling back to default RBG",
+            cfg_init.color_order
+        );
+        ColorOrder::default()
+    });
     ble_handle.try_send(BleMessage::SetColorOrder(initial_order));
 
     // Helper to automatically wake / turn on power if user interacts with controls
@@ -149,7 +155,7 @@ fn build_ui(app: &Application) {
                 power_btn.add_css_class("power-on-btn");
                 strip.borrow_mut().powered = true;
                 cfg.borrow_mut().powered = true;
-                cfg.borrow().save();
+                let _ = cfg.borrow().save();
                 if is_conn.get() {
                     ble.try_send(BleMessage::SendCommand(Command::PowerOn));
                 }
@@ -187,7 +193,7 @@ fn build_ui(app: &Application) {
             c.color_b = b;
             c.effect_name = "Static".into();
             c.hardware_pattern = None;
-            c.save();
+            let _ = c.save();
         }
 
         if is_connected_col.get() {
@@ -225,7 +231,7 @@ fn build_ui(app: &Application) {
                 let mut c = cfg.borrow_mut();
                 c.effect_name = eff.label().into();
                 c.hardware_pattern = None;
-                c.save();
+                let _ = c.save();
             }
         },
         {
@@ -242,7 +248,7 @@ fn build_ui(app: &Application) {
             move |pct| {
                 strip.borrow_mut().brightness = pct as f64 / 100.0;
                 cfg.borrow_mut().brightness = pct;
-                cfg.borrow().save();
+                let _ = cfg.borrow().save();
                 if is_conn.get() {
                     ble.try_send(BleMessage::SendCommand(Command::Brightness(pct)));
                 }
@@ -267,7 +273,7 @@ fn build_ui(app: &Application) {
                         let mut c = cfg.borrow_mut();
                         c.hardware_pattern = Some(idx);
                         c.effect_name = format!("HardwarePattern({})", idx);
-                        c.save();
+                        let _ = c.save();
                     }
 
                     if is_conn.get() {
@@ -312,7 +318,7 @@ fn build_ui(app: &Application) {
             let mut c = cfg_settings.borrow_mut();
             c.color_order = order.label().split(' ').next().unwrap_or("RBG").into();
             c.power_limit = pwr_limit;
-            c.save();
+            let _ = c.save();
 
             let mut eng = engine_settings.borrow_mut();
             let mut p = eng.params().clone();
@@ -342,7 +348,7 @@ fn build_ui(app: &Application) {
         {
             let mut c = cfg_pwr.borrow_mut();
             c.powered = new_power;
-            c.save();
+            let _ = c.save();
         }
 
         if new_power {
@@ -448,7 +454,7 @@ fn build_ui(app: &Application) {
                 }
                 BleEvent::DeviceFound(device) => {
                     config.borrow_mut().last_device_address = Some(device.address.to_string());
-                    config.borrow().save();
+                    let _ = config.borrow().save();
                     conn_h.add_device(device);
                 }
                 BleEvent::ScanComplete => {}

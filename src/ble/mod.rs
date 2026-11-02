@@ -1,3 +1,6 @@
+// ponytail: BLE worker managing BlueZ communication, cancellable scanning,
+// connection lifecycle, bounded reconnects, and serialized GATT writes.
+
 mod protocol;
 
 pub use protocol::{ColorOrder, Command, Protocol};
@@ -5,13 +8,15 @@ pub use protocol::{ColorOrder, Command, Protocol};
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
 use bluer::{
-    Adapter, AdapterEvent, Address, Device, DeviceEvent, DeviceProperty, DiscoveryFilter,
-    DiscoveryTransport, Session,
+    Adapter, AdapterEvent, Address, Device, DeviceEvent, DiscoveryFilter, DiscoveryTransport,
+    Session,
 };
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -20,6 +25,8 @@ const SERVICE_UUID: Uuid = Uuid::from_u128(0x0000ffe0_0000_1000_8000_00805f9b34f
 const CHAR_UUID: Uuid = Uuid::from_u128(0x0000ffe1_0000_1000_8000_00805f9b34fb);
 const DEVICE_NAME_PREFIXES: &[&str] = &["LEDDMX", "LED DMX", "LED-DMX"];
 const MAX_RECONNECT_ATTEMPTS: u8 = 5;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SCAN_DURATION: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConnectionState {
@@ -73,8 +80,8 @@ pub enum BleEvent {
 
 #[derive(Debug)]
 enum WorkerEvent {
-    ConnectionLost,
-    Reconnect(Address, u8),
+    ConnectionLost(u64),
+    Reconnect(u64, Address, u8),
 }
 
 #[derive(Clone)]
@@ -94,6 +101,11 @@ impl BleHandle {
     }
 }
 
+struct ActiveScan {
+    stream: Pin<Box<dyn futures::Stream<Item = AdapterEvent> + Send>>,
+    deadline: tokio::time::Instant,
+}
+
 pub struct BleWorker {
     rx: mpsc::Receiver<BleMessage>,
     internal_rx: mpsc::Receiver<WorkerEvent>,
@@ -104,10 +116,12 @@ pub struct BleWorker {
     device: Option<Device>,
     characteristic: Option<Characteristic>,
     write_mode: Option<WriteMode>,
+    active_scan: Option<ActiveScan>,
     monitor_task: Option<JoinHandle<()>>,
     reconnect_task: Option<JoinHandle<()>>,
     reconnect_address: Option<Address>,
     reconnect_attempt: u8,
+    connection_generation: u64,
     manual_disconnect: bool,
     protocol: Protocol,
 }
@@ -127,12 +141,14 @@ impl BleWorker {
             device: None,
             characteristic: None,
             write_mode: None,
+            active_scan: None,
             monitor_task: None,
             reconnect_task: None,
             reconnect_address: None,
             reconnect_attempt: 0,
+            connection_generation: 0,
             manual_disconnect: false,
-            protocol: Protocol::new(ColorOrder::Rbg),
+            protocol: Protocol::new(ColorOrder::default()),
         };
         (handle, worker)
     }
@@ -142,6 +158,8 @@ impl BleWorker {
         self.initialize_bluez().await;
 
         loop {
+            let has_active_scan = self.active_scan.is_some();
+
             tokio::select! {
                 message = self.rx.recv() => {
                     let Some(message) = message else { break };
@@ -154,9 +172,40 @@ impl BleWorker {
                         self.handle_worker_event(event).await;
                     }
                 }
+                // Non-blocking cancellable scan branch
+                scan_event = async {
+                    if let Some(scan) = self.active_scan.as_mut() {
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(scan.deadline) => {
+                                ScanResult::Deadline
+                            }
+                            item = scan.stream.next() => {
+                                match item {
+                                    Some(ev) => ScanResult::Item(ev),
+                                    None => ScanResult::Ended,
+                                }
+                            }
+                        }
+                    } else {
+                        std::future::pending::<ScanResult>().await
+                    }
+                }, if has_active_scan => {
+                    match scan_event {
+                        ScanResult::Item(AdapterEvent::DeviceAdded(address)) => {
+                            if let Some(adapter) = self.adapter.clone() {
+                                self.inspect_candidate(&adapter, address).await;
+                            }
+                        }
+                        ScanResult::Item(_) => {}
+                        ScanResult::Deadline | ScanResult::Ended => {
+                            self.stop_scan(true).await;
+                        }
+                    }
+                }
             }
         }
 
+        self.stop_scan(false).await;
         self.disconnect_current().await;
         info!("BLE worker stopped");
     }
@@ -171,7 +220,7 @@ impl BleWorker {
                     }
                     Err(error) => {
                         let message = format!(
-                            "No Bluetooth adapter is available. Check that BlueZ is running and an adapter is present: {error}"
+                            "No Bluetooth adapter available: {error}. Check system service and hardware."
                         );
                         error!("{message}");
                         self.emit_state(ConnectionState::Error(message));
@@ -180,9 +229,7 @@ impl BleWorker {
                 self.session = Some(session);
             }
             Err(error) => {
-                let message = format!(
-                    "BlueZ is unavailable. Check the bluetooth system service and D-Bus permissions: {error}"
-                );
+                let message = format!("BlueZ session error: {error}. Check D-Bus and bluetoothd.");
                 error!("{message}");
                 self.emit_state(ConnectionState::Error(message));
             }
@@ -191,25 +238,32 @@ impl BleWorker {
 
     async fn handle_message(&mut self, message: BleMessage) -> bool {
         match message {
-            BleMessage::Scan => self.handle_scan().await,
+            BleMessage::Scan => {
+                self.start_scan().await;
+            }
             BleMessage::Connect(address) => {
+                self.stop_scan(false).await;
                 self.manual_disconnect = false;
                 self.reconnect_attempt = 0;
                 self.reconnect_address = Some(address);
                 self.handle_connect(address, false).await;
             }
             BleMessage::Disconnect => {
+                self.stop_scan(false).await;
                 self.manual_disconnect = true;
                 self.cancel_reconnect();
                 self.disconnect_current().await;
                 self.emit_state(ConnectionState::Disconnected);
             }
-            BleMessage::SendCommand(command) => self.handle_command(command).await,
+            BleMessage::SendCommand(command) => {
+                self.handle_command(command).await;
+            }
             BleMessage::SetColorOrder(order) => {
                 self.protocol.set_color_order(order);
                 info!("Protocol color order set to {order:?}");
             }
             BleMessage::Shutdown => {
+                self.stop_scan(false).await;
                 self.manual_disconnect = true;
                 self.cancel_reconnect();
                 return false;
@@ -220,30 +274,45 @@ impl BleWorker {
 
     async fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::ConnectionLost => {
-                if self.manual_disconnect {
+            WorkerEvent::ConnectionLost(generation) => {
+                if generation != self.connection_generation || self.manual_disconnect {
+                    debug!(
+                        "Ignoring stale ConnectionLost generation={generation} current={}",
+                        self.connection_generation
+                    );
                     return;
                 }
                 self.disconnect_current().await;
                 self.emit_state(ConnectionState::Disconnected);
                 self.schedule_reconnect();
             }
-            WorkerEvent::Reconnect(address, _attempt) => {
-                if self.manual_disconnect || self.device.is_some() {
+            WorkerEvent::Reconnect(generation, address, attempt) => {
+                if generation != self.connection_generation
+                    || self.manual_disconnect
+                    || self.device.is_some()
+                {
+                    debug!(
+                        "Ignoring stale Reconnect generation={generation} current={}",
+                        self.connection_generation
+                    );
                     return;
                 }
+                info!("Executing scheduled reconnect attempt {attempt} for {address}");
                 self.handle_connect(address, true).await;
             }
         }
     }
 
-    async fn handle_scan(&mut self) {
+    async fn start_scan(&mut self) {
         if self.device.is_some() || self.characteristic.is_some() {
             self.emit_state(ConnectionState::Error(
-                "Disconnect from the current controller before scanning.".into(),
+                "Disconnect from current controller before scanning.".into(),
             ));
             return;
         }
+
+        // Cancel previous scan if running
+        self.stop_scan(false).await;
 
         let Some(adapter) = self.adapter.clone() else {
             self.emit_state(ConnectionState::Error(
@@ -252,14 +321,12 @@ impl BleWorker {
             return;
         };
 
-        self.emit_state(ConnectionState::Scanning);
-        info!("BLE scan started on adapter {}", adapter.name());
-
+        // Check power state
         match adapter.is_powered().await {
             Ok(false) => {
                 if let Err(error) = adapter.set_powered(true).await {
                     let message = format!(
-                        "Bluetooth adapter is powered off or permission denied. Enable Bluetooth in system settings or unblock rfkill: {error}"
+                        "Bluetooth adapter is powered off or soft-blocked. Run 'rfkill unblock bluetooth': {error}"
                     );
                     error!("{message}");
                     self.emit_state(ConnectionState::Error(message));
@@ -276,39 +343,39 @@ impl BleWorker {
             ..Default::default()
         };
         if let Err(error) = adapter.set_discovery_filter(filter).await {
-            warn!("Could not set LE discovery filter, continuing with BlueZ defaults: {error}");
+            warn!("Could not set LE discovery filter, using BlueZ defaults: {error}");
         }
 
         let discover = match adapter.discover_devices().await {
             Ok(stream) => stream,
             Err(error) => {
-                let message =
-                    format!("BLE scan failed. Check adapter availability and BlueZ: {error}");
+                let message = format!("BLE scan failed: {error}");
                 error!("{message}");
                 self.emit_state(ConnectionState::Error(message));
                 return;
             }
         };
 
-        let mut stream = Box::pin(discover);
-        let deadline = tokio::time::sleep(tokio::time::Duration::from_secs(8));
-        tokio::pin!(deadline);
+        self.emit_state(ConnectionState::Scanning);
+        info!("BLE cancellable scan started on adapter {}", adapter.name());
 
-        loop {
-            tokio::select! {
-                _ = &mut deadline => break,
-                event = stream.next() => {
-                    let Some(event) = event else { break };
-                    if let AdapterEvent::DeviceAdded(address) = event {
-                        self.inspect_candidate(&adapter, address).await;
-                    }
-                }
+        let deadline = tokio::time::Instant::now() + SCAN_DURATION;
+        self.active_scan = Some(ActiveScan {
+            stream: Box::pin(discover),
+            deadline,
+        });
+    }
+
+    async fn stop_scan(&mut self, emit_complete: bool) {
+        if self.active_scan.take().is_some() {
+            if emit_complete {
+                self.emit_event(BleEvent::ScanComplete);
+                self.emit_state(ConnectionState::Disconnected);
+                info!("BLE scan completed normally");
+            } else {
+                debug!("Active BLE scan cancelled");
             }
         }
-
-        self.emit_event(BleEvent::ScanComplete);
-        self.emit_state(ConnectionState::Disconnected);
-        info!("BLE scan complete");
     }
 
     async fn inspect_candidate(&self, adapter: &Adapter, address: Address) {
@@ -377,6 +444,9 @@ impl BleWorker {
     }
 
     async fn handle_connect(&mut self, address: Address, reconnect: bool) {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        let generation = self.connection_generation;
+
         if self.device.is_some() || self.characteristic.is_some() {
             self.disconnect_current().await;
         }
@@ -409,30 +479,71 @@ impl BleWorker {
         } else {
             ConnectionState::Connecting(name.clone())
         });
-        info!("Connecting to BLE controller {name} at {address}");
+        info!("Connecting to BLE controller {name} at {address} (gen={generation})");
 
-        if let Err(error) = device.connect().await {
-            self.connection_failed(
-                format!("Connection to {address} failed: {error}"),
-                reconnect,
-            )
-            .await;
-            return;
-        }
+        // Wrapped in explicit connection timeout
+        let connect_future = async {
+            device.connect().await?;
+            Ok::<(), bluer::Error>(())
+        };
 
-        self.emit_state(ConnectionState::DiscoveringServices(name.clone()));
-        let (characteristic, write_mode) = match Self::find_characteristic(&device).await {
-            Ok(found) => found,
-            Err(error) => {
-                let _ = device.disconnect().await;
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect_future).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
                 self.connection_failed(
-                    format!("GATT validation failed for {name}: {error}"),
+                    format!("Connection to {address} failed: {error}"),
                     reconnect,
                 )
                 .await;
                 return;
             }
-        };
+            Err(_) => {
+                let _ = device.disconnect().await;
+                self.connection_failed(
+                    format!(
+                        "Connection to {address} timed out after {}s",
+                        CONNECT_TIMEOUT.as_secs()
+                    ),
+                    reconnect,
+                )
+                .await;
+                return;
+            }
+        }
+
+        self.emit_state(ConnectionState::DiscoveringServices(name.clone()));
+
+        // GATT service discovery with timeout
+        let discovery_future = Self::find_characteristic(&device);
+        let (characteristic, write_mode) =
+            match tokio::time::timeout(CONNECT_TIMEOUT, discovery_future).await {
+                Ok(Ok(found)) => found,
+                Ok(Err(error)) => {
+                    let _ = device.disconnect().await;
+                    self.connection_failed(
+                        format!("GATT validation failed for {name}: {error}"),
+                        reconnect,
+                    )
+                    .await;
+                    return;
+                }
+                Err(_) => {
+                    let _ = device.disconnect().await;
+                    self.connection_failed(
+                        format!("GATT service discovery for {name} timed out"),
+                        reconnect,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+        // Ensure generation has not changed while waiting for I/O
+        if generation != self.connection_generation {
+            debug!("Connection generation changed during connect; cleaning up (gen={generation} current={})", self.connection_generation);
+            let _ = device.disconnect().await;
+            return;
+        }
 
         self.device = Some(device.clone());
         self.characteristic = Some(characteristic);
@@ -440,9 +551,9 @@ impl BleWorker {
         self.reconnect_address = Some(address);
         self.reconnect_attempt = 0;
         self.cancel_reconnect();
-        self.start_connection_monitor(device).await;
+        self.start_connection_monitor(device, generation).await;
         self.emit_state(ConnectionState::Ready(name.clone()));
-        info!("BLE controller ready name={name} address={address} write_mode={write_mode:?}");
+        info!("BLE controller ready name={name} address={address} write_mode={write_mode:?} gen={generation}");
     }
 
     async fn find_characteristic(
@@ -452,7 +563,7 @@ impl BleWorker {
         for service in services {
             let service_uuid = service.uuid().await?;
             let characteristics = service.characteristics().await?;
-            info!(
+            debug!(
                 "GATT service uuid={service_uuid} characteristic_count={}",
                 characteristics.len()
             );
@@ -464,17 +575,7 @@ impl BleWorker {
             for characteristic in characteristics {
                 let uuid = characteristic.uuid().await?;
                 let flags = characteristic.flags().await?;
-                let descriptors = characteristic.descriptors().await?;
-                let descriptor_uuids = futures::future::join_all(
-                    descriptors.iter().map(|descriptor| descriptor.uuid()),
-                )
-                .await
-                .into_iter()
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
-                info!(
-                    "GATT characteristic uuid={uuid} flags={flags:?} descriptors={descriptor_uuids:?}"
-                );
+                debug!("GATT characteristic uuid={uuid} flags={flags:?}");
 
                 if uuid != CHAR_UUID {
                     continue;
@@ -496,42 +597,46 @@ impl BleWorker {
         Err("expected service FFE0 and writable characteristic FFE1 were not found".into())
     }
 
-    async fn start_connection_monitor(&mut self, device: Device) {
+    async fn start_connection_monitor(&mut self, device: Device, generation: u64) {
         if let Some(task) = self.monitor_task.take() {
             task.abort();
         }
+
+        let events = match device.events().await {
+            Ok(events) => events,
+            Err(error) => {
+                warn!("Could not subscribe to device events: {error}");
+                return;
+            }
+        };
+
         let worker_tx = self.internal_tx.clone();
         self.monitor_task = Some(tokio::spawn(async move {
-            match device.events().await {
-                Ok(mut events) => {
-                    while let Some(event) = events.next().await {
-                        if matches!(
-                            event,
-                            DeviceEvent::PropertyChanged(DeviceProperty::Connected(false))
-                        ) {
-                            let _ = worker_tx.send(WorkerEvent::ConnectionLost).await;
-                            break;
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!("BLE connection monitor failed: {error}");
-                    let _ = worker_tx.send(WorkerEvent::ConnectionLost).await;
+            let mut stream = Box::pin(events);
+            while let Some(event) = stream.next().await {
+                if let DeviceEvent::PropertyChanged(bluer::DeviceProperty::Connected(false)) = event
+                {
+                    info!("BlueZ reported device disconnected (gen={generation})");
+                    let _ = worker_tx
+                        .send(WorkerEvent::ConnectionLost(generation))
+                        .await;
+                    break;
                 }
             }
         }));
     }
 
     async fn handle_command(&mut self, command: Command) {
-        let Some(characteristic) = self.characteristic.clone() else {
+        let Some(characteristic) = self.characteristic.as_ref() else {
+            debug!("Ignoring command because controller is not connected: {command:?}");
             self.emit_event(BleEvent::CommandFailed(
-                "Command rejected because the controller is not GATT-ready.".into(),
+                "Controller is not ready for commands.".into(),
             ));
             return;
         };
         let Some(write_mode) = self.write_mode else {
             self.emit_event(BleEvent::CommandFailed(
-                "Command rejected because no GATT write mode was selected.".into(),
+                "Command rejected: no GATT write mode selected.".into(),
             ));
             return;
         };
@@ -563,14 +668,17 @@ impl BleWorker {
             },
             ..Default::default()
         };
-        info!("BLE write command={command:?} mode={write_mode:?} frame={frame:02X?}");
+        debug!("BLE write command={command:?} mode={write_mode:?} frame={frame:02X?}");
 
         match characteristic.write_ext(&frame, &request).await {
             Ok(()) => {
                 self.emit_event(BleEvent::CommandSent);
                 if let Some(device) = self.device.clone() {
                     if !device.is_connected().await.unwrap_or(false) && !self.manual_disconnect {
-                        let _ = self.internal_tx.send(WorkerEvent::ConnectionLost).await;
+                        let _ = self
+                            .internal_tx
+                            .send(WorkerEvent::ConnectionLost(self.connection_generation))
+                            .await;
                     } else if let Some(name) = device.name().await.ok().flatten() {
                         self.emit_state(ConnectionState::Ready(name));
                     }
@@ -582,7 +690,10 @@ impl BleWorker {
                 self.emit_event(BleEvent::CommandFailed(message));
                 if let Some(device) = self.device.clone() {
                     if !device.is_connected().await.unwrap_or(false) && !self.manual_disconnect {
-                        let _ = self.internal_tx.send(WorkerEvent::ConnectionLost).await;
+                        let _ = self
+                            .internal_tx
+                            .send(WorkerEvent::ConnectionLost(self.connection_generation))
+                            .await;
                     }
                 }
             }
@@ -603,15 +714,19 @@ impl BleWorker {
         };
         if self.reconnect_attempt >= MAX_RECONNECT_ATTEMPTS {
             self.emit_state(ConnectionState::Error(format!(
-                "Reconnect limit reached for {address}; connect manually after checking the controller and phone app."
+                "Reconnect limit reached for {address}; reconnect manually after checking power and BLE clients."
             )));
             return;
         }
+
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        let generation = self.connection_generation;
 
         self.reconnect_attempt += 1;
         let attempt = self.reconnect_attempt;
         let delay_seconds = 2_u64.saturating_pow((attempt - 1).min(4) as u32).min(30);
         self.emit_state(ConnectionState::Reconnecting(address.to_string(), attempt));
+
         if let Some(task) = self.reconnect_task.take() {
             task.abort();
         }
@@ -620,13 +735,14 @@ impl BleWorker {
         self.reconnect_task = Some(tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(delay_seconds)).await;
             let _ = worker_tx
-                .send(WorkerEvent::Reconnect(address, attempt))
+                .send(WorkerEvent::Reconnect(generation, address, attempt))
                 .await;
         }));
-        info!("Scheduled BLE reconnect attempt={attempt} delay_seconds={delay_seconds}");
+        info!("Scheduled BLE reconnect attempt={attempt} delay_seconds={delay_seconds} (gen={generation})");
     }
 
     async fn disconnect_current(&mut self) {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
         if let Some(task) = self.monitor_task.take() {
             task.abort();
         }
@@ -645,6 +761,7 @@ impl BleWorker {
     }
 
     fn cancel_reconnect(&mut self) {
+        self.connection_generation = self.connection_generation.wrapping_add(1);
         if let Some(task) = self.reconnect_task.take() {
             task.abort();
         }
@@ -659,9 +776,32 @@ impl BleWorker {
     }
 }
 
-fn is_target_name(name: &str) -> bool {
+enum ScanResult {
+    Item(AdapterEvent),
+    Deadline,
+    Ended,
+}
+
+pub fn is_target_name(name: &str) -> bool {
     let upper = name.trim().to_ascii_uppercase();
     DEVICE_NAME_PREFIXES
         .iter()
         .any(|prefix| upper.starts_with(&prefix.to_ascii_uppercase()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_target_name() {
+        assert!(is_target_name("LEDDMX-03-A1B2"));
+        assert!(is_target_name("LEDDMX"));
+        assert!(is_target_name("leddmx-test"));
+        assert!(is_target_name("LED DMX Strip"));
+        assert!(is_target_name("LED-DMX-01"));
+        assert!(!is_target_name("Govee-Light"));
+        assert!(!is_target_name("Bluetooth Speaker"));
+        assert!(!is_target_name(""));
+    }
 }

@@ -1,46 +1,75 @@
-// ponytail: Effects engine driving software animations and hardware pattern simulation.
-// Includes electrical power budget limiter and soft-start inrush protection.
+// ponytail: Effects engine with explicit capability separation between whole-strip
+// BLE transmission, controller-internal patterns, and local preview simulation.
+// Strictly zero emojis and zero em-dashes.
 
 use palette::{FromColor, Hsl, Srgb};
 
-/// Available built-in effects.
+/// The transmission capability of an effect mode.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectCapability {
+    /// Transmitted as whole-strip 9-byte static color frames over BLE (0x7B FF 07 ...).
+    WholeStripColor,
+    /// Activated once via 9-byte pattern command (0x7B FF 03 idx ...); executed by the controller microchip.
+    HardwareControllerPattern,
+    /// Local desktop visual preview only; not transmitted over the physical BLE link.
+    LocalPreviewOnly,
+}
+
+/// Available effect modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
-    /// No effect, manual colour control.
+    /// Static single whole-strip color.
     Static,
-    /// Smooth hue cycling through the full spectrum.
+    /// Continuous whole-strip spectrum walk.
     HueCycle,
-    /// Breathing/pulse effect on current colour.
+    /// Whole-strip breathing pulse on base color.
     Breathing,
-    /// Strobe/flash effect.
+    /// Whole-strip strobe flash.
     Strobe,
-    /// Colour fade between warm tones.
+    /// Whole-strip warm tone fade.
     WarmFade,
-    /// Colour fade between cool tones.
+    /// Whole-strip cool tone fade.
     CoolFade,
-    /// Rainbow jump (discrete colour steps).
+    /// Whole-strip discrete rainbow jump.
     RainbowJump,
-    /// Candle flicker simulation.
+    /// Whole-strip candle flicker simulation.
     CandleFlicker,
-    /// Cross-fade between two user-selected colours.
+    /// Whole-strip cross-fade between two colors.
     CrossFade,
-    /// Built-in hardware pattern index (0-210) running on controller microchip.
+    /// Built-in controller microchip pattern routine (index 0 to 210).
     HardwarePattern(u8),
 }
 
 impl Effect {
     pub fn label(&self) -> &'static str {
         match self {
-            Effect::Static => "Static",
-            Effect::HueCycle => "Hue Cycle",
-            Effect::Breathing => "Breathing",
-            Effect::Strobe => "Strobe",
-            Effect::WarmFade => "Warm Fade",
-            Effect::CoolFade => "Cool Fade",
-            Effect::RainbowJump => "Rainbow Jump",
-            Effect::CandleFlicker => "Candle Flicker",
-            Effect::CrossFade => "Cross Fade",
-            Effect::HardwarePattern(_) => "Hardware Pattern",
+            Effect::Static => "Static Color",
+            Effect::HueCycle => "Hue Cycle (Whole Strip)",
+            Effect::Breathing => "Breathing (Whole Strip)",
+            Effect::Strobe => "Strobe (Whole Strip)",
+            Effect::WarmFade => "Warm Fade (Whole Strip)",
+            Effect::CoolFade => "Cool Fade (Whole Strip)",
+            Effect::RainbowJump => "Rainbow Jump (Whole Strip)",
+            Effect::CandleFlicker => "Candle Flicker (Whole Strip)",
+            Effect::CrossFade => "Cross Fade (Whole Strip)",
+            Effect::HardwarePattern(_) => "Hardware Pattern (Microchip Routine)",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn capability(&self) -> EffectCapability {
+        match self {
+            Effect::Static
+            | Effect::HueCycle
+            | Effect::Breathing
+            | Effect::Strobe
+            | Effect::WarmFade
+            | Effect::CoolFade
+            | Effect::RainbowJump
+            | Effect::CandleFlicker
+            | Effect::CrossFade => EffectCapability::WholeStripColor,
+            Effect::HardwarePattern(_) => EffectCapability::HardwareControllerPattern,
         }
     }
 
@@ -59,22 +88,17 @@ impl Effect {
     }
 }
 
-/// Parameters controlling how effects are rendered.
+/// Parameters controlling effect generation.
 #[derive(Debug, Clone)]
 pub struct EffectParams {
-    /// Base colour for effects that modulate a single colour.
     pub base_r: u8,
     pub base_g: u8,
     pub base_b: u8,
-    /// Secondary colour for cross-fade.
     pub alt_r: u8,
     pub alt_g: u8,
     pub alt_b: u8,
-    /// Speed multiplier (0.1 to 10.0, default 1.0).
     pub speed: f64,
-    /// Overall brightness (0.0 to 1.0).
     pub brightness: f64,
-    /// Enable electrical current budget limiter (softens 100% white inrush).
     pub power_limit_enabled: bool,
 }
 
@@ -94,13 +118,11 @@ impl Default for EffectParams {
     }
 }
 
-/// Drives software and simulated hardware LED effects with soft-start electrical transitions.
+/// Engine generating whole-strip colors for physical transmission and preview segments for the GUI.
 pub struct EffectEngine {
     effect: Effect,
     params: EffectParams,
-    /// Internal time accumulator in seconds.
     time: f64,
-    /// Smoothed output channels for inrush current protection.
     current_r: f64,
     current_g: f64,
     current_b: f64,
@@ -131,18 +153,13 @@ impl EffectEngine {
         self.params = params;
     }
 
-    #[allow(dead_code)]
     pub fn params(&self) -> &EffectParams {
         &self.params
     }
 
-    #[allow(dead_code)]
-    pub fn params_mut(&mut self) -> &mut EffectParams {
-        &mut self.params
-    }
-
-    /// Advance the internal clock by `dt` seconds and return the current RGB output.
-    pub fn tick(&mut self, dt: f64) -> (u8, u8, u8) {
+    /// Advance time and compute the physical whole-strip output.
+    /// Returns the exact (r, g, b) values to be encoded and transmitted over BLE.
+    pub fn tick_whole_strip(&mut self, dt: f64) -> (u8, u8, u8) {
         self.time += dt * self.params.speed;
 
         let (target_r, target_g, target_b) = match self.effect {
@@ -155,30 +172,27 @@ impl EffectEngine {
             Effect::RainbowJump => self.compute_rainbow_jump(),
             Effect::CandleFlicker => self.compute_candle_flicker(),
             Effect::CrossFade => self.compute_cross_fade(),
-            Effect::HardwarePattern(idx) => self.compute_hardware_pattern_for_led(idx, 0.0),
+            Effect::HardwarePattern(idx) => self.simulate_hardware_pattern(idx),
         };
 
-        // Apply brightness scaling
         let br = self.params.brightness;
         let mut r = target_r as f64 * br;
         let mut g = target_g as f64 * br;
         let mut b = target_b as f64 * br;
 
-        // Electrical power budget limiter:
-        // On 5V USB supplies, full white (R=255, G=255, B=255) draws up to 3A, causing
-        // voltage drop and controller brownout. Limit total current sum gracefully.
+        // Software power budget limiter for local color synthesis
         if self.params.power_limit_enabled {
             let total = r + g + b;
-            let max_safe_sum = 630.0; // ~82% peak power ceiling
-            if total > max_safe_sum {
-                let factor = max_safe_sum / total;
+            let max_safe = 630.0;
+            if total > max_safe {
+                let factor = max_safe / total;
                 r *= factor;
                 g *= factor;
                 b *= factor;
             }
         }
 
-        // Soft-start slew filter: smooth transition over 60ms to prevent inrush spikes
+        // Soft-start slew rate filter: prevents sudden inrush spikes
         let slew_rate = (dt * 18.0).clamp(0.05, 1.0);
         self.current_r += (r - self.current_r) * slew_rate;
         self.current_g += (g - self.current_g) * slew_rate;
@@ -191,47 +205,41 @@ impl EffectEngine {
         )
     }
 
-    /// Compute per-LED colors across an N-LED strip for authentic wave and chase preview.
-    pub fn compute_strip_leds<const N: usize>(&self) -> [(f64, f64, f64); N] {
+    /// Backward-compatible alias for tick_whole_strip.
+    pub fn tick(&mut self, dt: f64) -> (u8, u8, u8) {
+        self.tick_whole_strip(dt)
+    }
+
+    /// Compute visual preview segments for the local GTK canvas.
+    /// Whole-strip effects display uniform segments matching physical output.
+    pub fn compute_preview_segments<const N: usize>(&self) -> [(f64, f64, f64); N] {
         let mut output = [(0.0, 0.0, 0.0); N];
+        let (wr, wg, wb) = match self.effect {
+            Effect::Static => (self.params.base_r, self.params.base_g, self.params.base_b),
+            Effect::HueCycle => self.compute_hue_cycle(),
+            Effect::Breathing => self.compute_breathing(),
+            Effect::Strobe => self.compute_strobe(),
+            Effect::WarmFade => self.compute_warm_fade(),
+            Effect::CoolFade => self.compute_cool_fade(),
+            Effect::RainbowJump => self.compute_rainbow_jump(),
+            Effect::CandleFlicker => self.compute_candle_flicker(),
+            Effect::CrossFade => self.compute_cross_fade(),
+            Effect::HardwarePattern(idx) => self.simulate_hardware_pattern(idx),
+        };
 
-        for (i, led) in output.iter_mut().enumerate() {
-            let offset = i as f64 / N as f64;
-            let (r, g, b) = match self.effect {
-                Effect::Static => (self.params.base_r, self.params.base_g, self.params.base_b),
-                Effect::HardwarePattern(idx) => self.compute_hardware_pattern_for_led(idx, offset),
-                Effect::HueCycle => {
-                    // Whole strip walks hue with subtle wave shimmer
-                    let (hr, hg, hb) = self.compute_hue_cycle();
-                    let wave = ((self.time * 2.0 + offset * std::f64::consts::PI * 2.0).sin()
-                        * 0.08
-                        + 0.92)
-                        .clamp(0.0, 1.0);
-                    (
-                        ((hr as f64) * wave) as u8,
-                        ((hg as f64) * wave) as u8,
-                        ((hb as f64) * wave) as u8,
-                    )
-                }
-                Effect::Breathing => self.compute_breathing(),
-                Effect::Strobe => self.compute_strobe(),
-                Effect::WarmFade => self.compute_warm_fade(),
-                Effect::CoolFade => self.compute_cool_fade(),
-                Effect::RainbowJump => self.compute_rainbow_jump(),
-                Effect::CandleFlicker => self.compute_candle_flicker(),
-                Effect::CrossFade => self.compute_cross_fade(),
-            };
-
-            *led = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
-        }
-
+        let norm_color = (wr as f64 / 255.0, wg as f64 / 255.0, wb as f64 / 255.0);
+        output.fill(norm_color);
         output
     }
 
-    /// Simulate the controller microchip patterns for accurate visual preview with per-LED offset.
-    pub fn compute_hardware_pattern_for_led(&self, idx: u8, offset: f64) -> (u8, u8, u8) {
+    /// Alias for compute_preview_segments.
+    pub fn compute_strip_leds<const N: usize>(&self) -> [(f64, f64, f64); N] {
+        self.compute_preview_segments::<N>()
+    }
+
+    /// Approximate visual simulation for controller-internal pattern preview in the GUI.
+    fn simulate_hardware_pattern(&self, idx: u8) -> (u8, u8, u8) {
         match idx {
-            // Fade modes (1-8): single-color or spectrum breathing
             1 => {
                 let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
                 ((255.0 * factor) as u8, 0, 0)
@@ -262,7 +270,6 @@ impl EffectEngine {
                 (v, v, v)
             }
             8 => {
-                // 7-Color Fade
                 let cycle_secs = 8.0;
                 let hue = ((self.time % cycle_secs) / cycle_secs * 360.0) as f32;
                 let hsl = Hsl::new(hue, 1.0, 0.5);
@@ -273,15 +280,12 @@ impl EffectEngine {
                     (rgb.blue * 255.0) as u8,
                 )
             }
-            // Jump modes (9-11)
             9 => {
-                // 3-Color Jump (Red, Green, Blue)
                 let colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)];
                 let step = ((self.time * 2.5) as usize) % colors.len();
                 colors[step]
             }
             10 | 11 => {
-                // 7-Color Jump
                 let colors = [
                     (255, 0, 0),
                     (255, 128, 0),
@@ -294,7 +298,6 @@ impl EffectEngine {
                 let step = ((self.time * 2.5) as usize) % colors.len();
                 colors[step]
             }
-            // Strobe modes (12-19)
             12..=19 => {
                 let on = ((self.time * 6.0) % 1.0) < 0.45;
                 if on {
@@ -311,42 +314,8 @@ impl EffectEngine {
                     (0, 0, 0)
                 }
             }
-            // Rainbow Chase (20-29)
-            20..=29 => {
-                let hue = ((self.time * 180.0 + offset * 360.0) % 360.0) as f32;
-                let hsl = Hsl::new(hue, 1.0, 0.5);
-                let rgb = Srgb::from_color(hsl);
-                (
-                    (rgb.red * 255.0) as u8,
-                    (rgb.green * 255.0) as u8,
-                    (rgb.blue * 255.0) as u8,
-                )
-            }
-            // Fire Chase (30-39)
-            30..=39 => {
-                let wave = ((self.time * 3.0 - offset * 4.0) % 1.0 + 1.0) % 1.0;
-                let r = (200.0 + wave * 55.0) as u8;
-                let g = (wave * 120.0) as u8;
-                (r, g, 0)
-            }
-            // Meteor / Stream (40-49)
-            40..=49 => {
-                let head = (self.time * 1.5) % 1.0;
-                let dist = (head - offset + 1.0) % 1.0;
-                if dist < 0.25 {
-                    let brightness = 1.0 - (dist / 0.25);
-                    (
-                        (100.0 * brightness) as u8,
-                        (200.0 * brightness) as u8,
-                        (255.0 * brightness) as u8,
-                    )
-                } else {
-                    (5, 10, 30)
-                }
-            }
-            // Other controller patterns: flowing spectral cycle
             _ => {
-                let hue = ((self.time * 120.0 + offset * 360.0 + idx as f64 * 12.0) % 360.0) as f32;
+                let hue = ((self.time * 120.0 + idx as f64 * 12.0) % 360.0) as f32;
                 let hsl = Hsl::new(hue, 1.0, 0.5);
                 let rgb = Srgb::from_color(hsl);
                 (
@@ -358,7 +327,6 @@ impl EffectEngine {
         }
     }
 
-    /// Smooth hue rotation over a 30-second default cycle.
     fn compute_hue_cycle(&self) -> (u8, u8, u8) {
         let cycle_secs = 30.0;
         let hue = ((self.time % cycle_secs) / cycle_secs * 360.0) as f32;
@@ -371,7 +339,6 @@ impl EffectEngine {
         )
     }
 
-    /// Pulse the base colour using a sine wave.
     fn compute_breathing(&self) -> (u8, u8, u8) {
         let phase = (self.time * std::f64::consts::TAU / 4.0).sin();
         let factor = (phase + 1.0) / 2.0;
@@ -382,7 +349,6 @@ impl EffectEngine {
         )
     }
 
-    /// Hard on/off flash at ~4 Hz.
     fn compute_strobe(&self) -> (u8, u8, u8) {
         let on = ((self.time * 4.0) % 1.0) < 0.5;
         if on {
@@ -392,7 +358,6 @@ impl EffectEngine {
         }
     }
 
-    /// Fade through warm colours: red -> orange -> yellow -> red.
     fn compute_warm_fade(&self) -> (u8, u8, u8) {
         let cycle_secs = 8.0;
         let hue = ((self.time % cycle_secs) / cycle_secs * 60.0) as f32;
@@ -405,7 +370,6 @@ impl EffectEngine {
         )
     }
 
-    /// Fade through cool colours: blue -> cyan -> violet -> blue.
     fn compute_cool_fade(&self) -> (u8, u8, u8) {
         let cycle_secs = 8.0;
         let t = (self.time % cycle_secs) / cycle_secs;
@@ -419,7 +383,6 @@ impl EffectEngine {
         )
     }
 
-    /// Jump between 7 rainbow colours every ~0.5 seconds.
     fn compute_rainbow_jump(&self) -> (u8, u8, u8) {
         let rainbow_hues: [f32; 7] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0];
         let step = (self.time * 2.0) as usize % rainbow_hues.len();
@@ -432,7 +395,6 @@ impl EffectEngine {
         )
     }
 
-    /// Candle flicker effect: warm amber with subtle random-walk variations.
     fn compute_candle_flicker(&self) -> (u8, u8, u8) {
         let f1 = (self.time * 7.3).sin() * 0.15;
         let f2 = (self.time * 13.7).sin() * 0.10;
@@ -445,7 +407,6 @@ impl EffectEngine {
         (r, g, b)
     }
 
-    /// Cross-fade between base colour and alt colour.
     fn compute_cross_fade(&self) -> (u8, u8, u8) {
         let cycle_secs = 6.0;
         let t = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
@@ -482,7 +443,6 @@ mod tests {
             power_limit_enabled: true,
             ..Default::default()
         });
-        // Run several ticks for slew filter to stabilize
         let mut out = (0, 0, 0);
         for _ in 0..60 {
             out = engine.tick(0.016);
@@ -492,11 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn test_hardware_pattern_simulation() {
-        let mut engine = EffectEngine::new();
-        engine.set_effect(Effect::HardwarePattern(1)); // Red Fade
-        let (_r, g, b) = engine.tick(0.1);
-        assert_eq!(g, 0);
-        assert_eq!(b, 0);
+    fn test_effect_capabilities() {
+        assert_eq!(
+            Effect::Static.capability(),
+            EffectCapability::WholeStripColor
+        );
+        assert_eq!(
+            Effect::HueCycle.capability(),
+            EffectCapability::WholeStripColor
+        );
+        assert_eq!(
+            Effect::HardwarePattern(5).capability(),
+            EffectCapability::HardwareControllerPattern
+        );
     }
 }

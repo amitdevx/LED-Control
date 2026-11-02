@@ -2,7 +2,7 @@
 //
 // ponytail: Provides interactive controls for audio reactivity and BPM tempo sync.
 
-use crate::effects::{MusicEngine, MusicMode};
+use crate::effects::{CaptureStatus, MusicEngine, MusicMode};
 use gtk::prelude::*;
 use gtk::{Box, CheckButton, DropDown, Label, Orientation, ProgressBar, Scale, StringList};
 use std::cell::RefCell;
@@ -64,11 +64,37 @@ pub fn create_music_panel(
     let mic_check = CheckButton::with_label("Capture Live Audio (parec/PulseAudio)");
     mic_check.add_css_class("dim-label");
     mic_check.set_margin_top(8);
+
+    let mic_status_label = Label::new(None);
+    mic_status_label.add_css_class("dim-label");
+    mic_status_label.set_halign(gtk::Align::Start);
+    mic_status_label.set_visible(false);
+
     let engine_mic = music_engine.clone();
+    let status_lbl_clone = mic_status_label.clone();
     mic_check.connect_toggled(move |btn| {
-        engine_mic.borrow_mut().set_use_live_mic(btn.is_active());
+        let active = btn.is_active();
+        engine_mic.borrow_mut().set_use_live_mic(active);
+        let eng = engine_mic.borrow();
+        match eng.capture_status() {
+            CaptureStatus::Active => {
+                status_lbl_clone.set_text("Live audio capture active");
+                status_lbl_clone.remove_css_class("error");
+                status_lbl_clone.set_visible(true);
+            }
+            CaptureStatus::Failed(err) => {
+                status_lbl_clone.set_text(&format!("Capture error: {}", err));
+                status_lbl_clone.add_css_class("error");
+                status_lbl_clone.set_visible(true);
+                btn.set_active(false);
+            }
+            CaptureStatus::Inactive => {
+                status_lbl_clone.set_visible(false);
+            }
+        }
     });
     container.append(&mic_check);
+    container.append(&mic_status_label);
 
     // Sensitivity Slider
     let sens_label = Label::new(Some("Beat Sensitivity"));
@@ -134,17 +160,13 @@ pub fn create_music_panel(
     progress.set_margin_bottom(12);
     container.append(&progress);
 
-    // Update VU meter bar on tick
+    // Update VU meter bar on tick using current_energy without double-ticking
     let prog_ref = progress.clone();
     let engine_vu = music_engine.clone();
     gtk::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-        let mut eng = engine_vu.borrow_mut();
-        if eng.is_live_mic() {
-            let energy = (eng.tick(0.0).0 as f64 / 255.0).clamp(0.0, 1.0);
-            prog_ref.set_fraction(energy);
-        } else {
-            prog_ref.set_fraction(0.5);
-        }
+        let eng = engine_vu.borrow();
+        let energy = eng.current_energy();
+        prog_ref.set_fraction(energy);
         gtk::glib::ControlFlow::Continue
     });
 

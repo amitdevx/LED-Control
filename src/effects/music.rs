@@ -9,6 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// Audio capture status for PulseAudio/PipeWire recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureStatus {
+    Inactive,
+    Active,
+    Failed(String),
+}
+
 /// Music sync modes matching the LED LAMP app features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MusicMode {
@@ -45,9 +53,10 @@ impl MusicMode {
 /// Music sync configuration and live state.
 pub struct MusicEngine {
     mode: MusicMode,
-    sensitivity: f64, // 0.1 to 2.0
-    bpm: f64,         // 60.0 to 180.0
+    sensitivity: f64, // 0.1 to 3.0
+    bpm: f64,         // 40.0 to 240.0
     use_live_mic: bool,
+    capture_status: CaptureStatus,
     time: f64,
     color_index: usize,
     audio_energy: Arc<Mutex<f64>>,
@@ -62,6 +71,7 @@ impl MusicEngine {
             sensitivity: 1.0,
             bpm: 128.0,
             use_live_mic: false,
+            capture_status: CaptureStatus::Inactive,
             time: 0.0,
             color_index: 0,
             audio_energy: Arc::new(Mutex::new(0.0)),
@@ -98,7 +108,7 @@ impl MusicEngine {
     }
 
     pub fn set_use_live_mic(&mut self, live: bool) {
-        if self.use_live_mic == live {
+        if self.use_live_mic == live && !matches!(self.capture_status, CaptureStatus::Failed(_)) {
             return;
         }
         self.use_live_mic = live;
@@ -109,21 +119,22 @@ impl MusicEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_live_mic(&self) -> bool {
         self.use_live_mic
     }
 
-    /// Advance time and compute the reactive RGB values.
-    pub fn tick(&mut self, dt: f64) -> (u8, u8, u8) {
-        self.time += dt;
+    pub fn capture_status(&self) -> &CaptureStatus {
+        &self.capture_status
+    }
 
-        // Determine current energy level (0.0 to 1.0)
-        let energy = if self.use_live_mic {
-            let mut val = *self.audio_energy.lock().unwrap();
-            val = (val * self.sensitivity).clamp(0.0, 1.0);
-            val
+    /// Read current instantaneous energy level (0.0 to 1.0) without advancing time or state.
+    pub fn current_energy(&self) -> f64 {
+        if self.use_live_mic {
+            let val = self.audio_energy.lock().map(|g| *g).unwrap_or(0.0);
+            (val * self.sensitivity).clamp(0.0, 1.0)
         } else {
-            // Simulated rhythmic beat based on BPM
+            // Simulated rhythmic beat based on BPM and current phase
             let beat_freq = self.bpm / 60.0;
             let phase = (self.time * beat_freq * std::f64::consts::TAU).sin();
             let beat = if phase > 0.6 {
@@ -132,7 +143,13 @@ impl MusicEngine {
                 0.0
             };
             (beat * self.sensitivity).clamp(0.0, 1.0)
-        };
+        }
+    }
+
+    /// Advance time and compute the reactive RGB values.
+    pub fn tick(&mut self, dt: f64) -> (u8, u8, u8) {
+        self.time += dt;
+        let energy = self.current_energy();
 
         const PALETTE: [(u8, u8, u8); 6] = [
             (255, 0, 80),  // Neon Pink
@@ -203,36 +220,49 @@ impl MusicEngine {
             .stderr(Stdio::null())
             .spawn();
 
-        if let Ok(mut proc) = child {
-            if let Some(mut stdout) = proc.stdout.take() {
-                thread::spawn(move || {
-                    let mut buf = [0u8; 512];
-                    while active_clone.load(Ordering::SeqCst) {
-                        match stdout.read(&mut buf) {
-                            Ok(n) if n > 0 => {
-                                // Calculate root-mean-square amplitude
-                                let mut sum_sq: f64 = 0.0;
-                                let sample_count = n / 2;
-                                for i in 0..sample_count {
-                                    let sample = i16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]);
-                                    let norm = sample as f64 / 32768.0;
-                                    sum_sq += norm * norm;
-                                }
-                                if sample_count > 0 {
-                                    let rms = (sum_sq / sample_count as f64).sqrt();
-                                    let normalized = (rms * 4.0).clamp(0.0, 1.0);
-                                    if let Ok(mut energy) = energy_clone.lock() {
-                                        // Smooth decay filter
-                                        *energy = (*energy * 0.7).max(normalized);
+        match child {
+            Ok(mut proc) => {
+                if let Some(mut stdout) = proc.stdout.take() {
+                    thread::spawn(move || {
+                        let mut buf = [0u8; 512];
+                        while active_clone.load(Ordering::SeqCst) {
+                            match stdout.read(&mut buf) {
+                                Ok(n) if n > 0 => {
+                                    // Calculate root-mean-square amplitude
+                                    let mut sum_sq: f64 = 0.0;
+                                    let sample_count = n / 2;
+                                    for i in 0..sample_count {
+                                        let sample =
+                                            i16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]);
+                                        let norm = sample as f64 / 32768.0;
+                                        sum_sq += norm * norm;
+                                    }
+                                    if sample_count > 0 {
+                                        let rms = (sum_sq / sample_count as f64).sqrt();
+                                        let normalized = (rms * 4.0).clamp(0.0, 1.0);
+                                        if let Ok(mut energy) = energy_clone.lock() {
+                                            // Smooth decay filter
+                                            *energy = (*energy * 0.7).max(normalized);
+                                        }
                                     }
                                 }
+                                _ => break,
                             }
-                            _ => break,
                         }
-                    }
-                });
+                    });
+                    self.child_process = Some(proc);
+                    self.capture_status = CaptureStatus::Active;
+                } else {
+                    self.capture_status =
+                        CaptureStatus::Failed("Failed to capture parec stdout".to_string());
+                    self.use_live_mic = false;
+                }
             }
-            self.child_process = Some(proc);
+            Err(e) => {
+                log::warn!("Audio capture process failed to spawn: {e}");
+                self.capture_status = CaptureStatus::Failed(format!("parec unavailable: {e}"));
+                self.use_live_mic = false;
+            }
         }
     }
 
@@ -242,6 +272,7 @@ impl MusicEngine {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.capture_status = CaptureStatus::Inactive;
     }
 }
 
@@ -288,11 +319,30 @@ mod tests {
     }
 
     #[test]
+    fn test_current_energy_does_not_advance_time() {
+        let mut engine = MusicEngine::new();
+        engine.set_bpm(120.0);
+        let e1 = engine.current_energy();
+        let e2 = engine.current_energy();
+        assert_eq!(e1, e2);
+        assert_eq!(engine.time, 0.0);
+
+        let _ = engine.tick(0.1);
+        assert!((engine.time - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_sensitivity_clamping() {
         let mut engine = MusicEngine::new();
         engine.set_sensitivity(5.0);
         assert_eq!(engine.sensitivity(), 3.0);
         engine.set_sensitivity(0.01);
         assert_eq!(engine.sensitivity(), 0.1);
+    }
+
+    #[test]
+    fn test_capture_status_default() {
+        let engine = MusicEngine::new();
+        assert_eq!(*engine.capture_status(), CaptureStatus::Inactive);
     }
 }

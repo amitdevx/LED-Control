@@ -1,5 +1,7 @@
-// ponytail: LED strip visualization widget mimicking real SMD 5050 RGB hardware.
-// Supports per-diode color buffers for authentic chase and wave patterns.
+// ponytail: LED strip visualization widget for desktop simulation.
+// Note: The physical One94Store 5m strip operates as a uniform whole-strip bus.
+// This widget renders 28 preview segments on screen as a desktop visual simulator,
+// not a representation of individually addressable physical hardware LEDs.
 
 use gtk::prelude::*;
 use gtk::{glib, DrawingArea};
@@ -8,7 +10,8 @@ use std::f64::consts::PI;
 use std::rc::Rc;
 
 pub const STRIP_HEIGHT: i32 = 78;
-pub const SMD_COUNT: usize = 28;
+pub const DEFAULT_PREVIEW_SEGMENTS: usize = 28;
+pub const SMD_COUNT: usize = DEFAULT_PREVIEW_SEGMENTS;
 const SMD_SIZE: f64 = 16.0;
 const CUP_RADIUS: f64 = 5.8;
 
@@ -29,7 +32,7 @@ pub struct StripState {
     pub effect_active: bool,
     /// Connection indicator text.
     pub connection_status: String,
-    /// Per-LED individual color buffer.
+    /// Per-segment visual preview color buffer for the GTK canvas.
     pub led_colors: [(f64, f64, f64); SMD_COUNT],
 }
 
@@ -44,7 +47,7 @@ impl Default for StripState {
             brightness: 1.0,
             phase: 0.0,
             effect_active: false,
-            connection_status: "Simulator Mode (Ready)".into(),
+            connection_status: "Simulator Preview (Disconnected)".into(),
             led_colors: [initial_color; SMD_COUNT],
         }
     }
