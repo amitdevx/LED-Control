@@ -149,9 +149,46 @@ impl EffectEngine {
     }
 
     pub fn set_effect(&mut self, effect: Effect) {
+        let prev_effect = self.effect;
         self.effect = effect;
-        self.time = 0.0;
         self.transitioning = true;
+        if prev_effect != effect {
+            match effect {
+                Effect::HueCycle => {
+                    let srgb = Srgb::new(
+                        (self.current_r / 255.0).clamp(0.0, 1.0) as f32,
+                        (self.current_g / 255.0).clamp(0.0, 1.0) as f32,
+                        (self.current_b / 255.0).clamp(0.0, 1.0) as f32,
+                    );
+                    let hsl = Hsl::from_color(srgb);
+                    let deg = hsl.hue.into_positive_degrees() as f64;
+                    let cycle_secs = 24.0;
+                    self.time = (deg / 360.0) * cycle_secs;
+                }
+                Effect::Breathing => {
+                    // Start breathing at the peak of the sine wave
+                    self.time = 1.0;
+                }
+                _ => {
+                    self.time = 0.0;
+                }
+            }
+        }
+    }
+
+    pub fn set_initial_color(&mut self, r: u8, g: u8, b: u8, brightness: f64) {
+        self.params.base_r = r;
+        self.params.base_g = g;
+        self.params.base_b = b;
+        self.params.brightness = brightness.clamp(0.0, 1.0);
+        let br = self.params.brightness;
+        self.target_r = r as f64;
+        self.target_g = g as f64;
+        self.target_b = b as f64;
+        self.current_r = r as f64 * br;
+        self.current_g = g as f64 * br;
+        self.current_b = b as f64 * br;
+        self.transitioning = false;
     }
 
     pub fn effect(&self) -> Effect {
@@ -226,21 +263,21 @@ impl EffectEngine {
         // Frame-rate independent exponential smoothing filter:
         // Smoothly interpolates to target with zero stepped jumps.
         let lambda = match self.effect {
-            Effect::Static => 12.0,
+            Effect::Static => 8.0,
             Effect::Strobe | Effect::RainbowJump => 40.0,
-            _ => 16.0,
+            _ => 14.0,
         };
         let factor = 1.0 - (-dt * lambda).exp();
         self.current_r += (raw_r - self.current_r) * factor;
         self.current_g += (raw_g - self.current_g) * factor;
         self.current_b += (raw_b - self.current_b) * factor;
 
-        // Check if static transition has settled to within 0.5 unit
+        // Check if static transition has settled to within 0.3 unit
         if self.effect == Effect::Static {
             let dr = (self.current_r - raw_r).abs();
             let dg = (self.current_g - raw_g).abs();
             let db = (self.current_b - raw_b).abs();
-            if dr < 0.4 && dg < 0.4 && db < 0.4 {
+            if dr < 0.3 && dg < 0.3 && db < 0.3 {
                 self.current_r = raw_r;
                 self.current_g = raw_g;
                 self.current_b = raw_b;
@@ -321,10 +358,11 @@ impl EffectEngine {
     fn compute_breathing(&self) -> (f64, f64, f64) {
         let phase = (self.time * std::f64::consts::TAU / 4.0).sin();
         let factor = (phase + 1.0) / 2.0;
+        let smooth_factor = 0.04 + 0.96 * factor * factor;
         (
-            self.params.base_r as f64 * factor,
-            self.params.base_g as f64 * factor,
-            self.params.base_b as f64 * factor,
+            self.params.base_r as f64 * smooth_factor,
+            self.params.base_g as f64 * smooth_factor,
+            self.params.base_b as f64 * smooth_factor,
         )
     }
 
@@ -345,7 +383,8 @@ impl EffectEngine {
         let cycle_secs = 6.0;
         let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
         let factor = (phase + 1.0) / 2.0;
-        let hue = (factor * 55.0) as f32;
+        let smooth_factor = factor * factor * (3.0 - 2.0 * factor);
+        let hue = (smooth_factor * 55.0) as f32;
         let hsl = Hsl::new(hue, 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
@@ -359,7 +398,8 @@ impl EffectEngine {
         let cycle_secs = 6.0;
         let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
         let factor = (phase + 1.0) / 2.0;
-        let hue = (190.0 + factor * 80.0) as f32;
+        let smooth_factor = factor * factor * (3.0 - 2.0 * factor);
+        let hue = (190.0 + smooth_factor * 80.0) as f32;
         let hsl = Hsl::new(hue, 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
@@ -394,10 +434,14 @@ impl EffectEngine {
         let cycle_secs = 6.0;
         let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
         let factor = (phase + 1.0) / 2.0;
+        let smooth_factor = factor * factor * (3.0 - 2.0 * factor);
         (
-            self.params.base_r as f64 * (1.0 - factor) + self.params.alt_r as f64 * factor,
-            self.params.base_g as f64 * (1.0 - factor) + self.params.alt_g as f64 * factor,
-            self.params.base_b as f64 * (1.0 - factor) + self.params.alt_b as f64 * factor,
+            self.params.base_r as f64 * (1.0 - smooth_factor)
+                + self.params.alt_r as f64 * smooth_factor,
+            self.params.base_g as f64 * (1.0 - smooth_factor)
+                + self.params.alt_g as f64 * smooth_factor,
+            self.params.base_b as f64 * (1.0 - smooth_factor)
+                + self.params.alt_b as f64 * smooth_factor,
         )
     }
 }

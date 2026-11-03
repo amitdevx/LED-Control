@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let g = (srgb.green * 200.0) as u8;
             let b = (srgb.blue * 200.0) as u8;
 
-            let pkt = [0x7E, 0x07, 0x05, 0x03, r, g, b, 0x10, 0xEF];
+            let pkt = [0x7E, 0x00, 0x05, 0x03, r, g, b, 0x00, 0xEF];
             let _ = charac.write_ext(&pkt, &req).await;
         }
         sleep(Duration::from_millis(5)).await;
@@ -94,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let smooth_t = t * t * (3.0 - 2.0 * t);
         let r = (180.0 * (1.0 - smooth_t)) as u8;
         let b = (180.0 * smooth_t) as u8;
-        let pkt = [0x7E, 0x07, 0x05, 0x03, r, 0, b, 0x10, 0xEF];
+        let pkt = [0x7E, 0x00, 0x05, 0x03, r, 0, b, 0x00, 0xEF];
         let _ = charac.write_ext(&pkt, &req).await;
         sleep(Duration::from_millis(30)).await;
     }

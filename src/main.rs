@@ -116,11 +116,13 @@ fn build_ui(app: &Application) {
     // Initialize engine parameters from config
     {
         let mut eng = engine.borrow_mut();
+        eng.set_initial_color(
+            cfg_init.color_r,
+            cfg_init.color_g,
+            cfg_init.color_b,
+            cfg_init.brightness as f64 / 100.0,
+        );
         let mut p = eng.params().clone();
-        p.base_r = cfg_init.color_r;
-        p.base_g = cfg_init.color_g;
-        p.base_b = cfg_init.color_b;
-        p.brightness = cfg_init.brightness as f64 / 100.0;
         p.power_limit_enabled = cfg_init.power_limit;
         eng.set_params(p);
 
@@ -179,6 +181,8 @@ fn build_ui(app: &Application) {
     let music_act_col = music_active.clone();
     let ensure_pwr_col = ensure_powered.clone();
     let cfg_col = config.clone();
+    let is_conn_col = is_connected.clone();
+    let ble_col = ble_handle.clone();
 
     let (color_picker_box, color_handle) = ui::create_color_picker(move |r, g, b| {
         ensure_pwr_col();
@@ -194,6 +198,7 @@ fn build_ui(app: &Application) {
             s.effect_active = true;
         }
 
+        let had_hw = cfg_col.borrow().hardware_pattern.is_some();
         {
             let mut c = cfg_col.borrow_mut();
             c.color_r = r;
@@ -202,6 +207,10 @@ fn build_ui(app: &Application) {
             c.effect_name = "Static".into();
             c.hardware_pattern = None;
             let _ = c.save();
+        }
+
+        if had_hw && is_conn_col.get() {
+            ble_col.try_send(BleMessage::SendCommand(Command::Brightness(100)));
         }
     });
 
@@ -226,16 +235,23 @@ fn build_ui(app: &Application) {
             let music_act = music_act_fx.clone();
             let ensure_pwr = ensure_pwr_fx.clone();
             let cfg = cfg_fx.clone();
+            let is_conn = is_connected_fx.clone();
+            let ble = ble_handle_fx.clone();
             move |eff| {
                 ensure_pwr();
                 music_act.set(false);
                 engine.borrow_mut().set_effect(eff);
                 strip.borrow_mut().effect_active = eff != Effect::Static;
 
+                let had_hw = cfg.borrow().hardware_pattern.is_some();
                 let mut c = cfg.borrow_mut();
                 c.effect_name = eff.label().into();
                 c.hardware_pattern = None;
                 let _ = c.save();
+
+                if had_hw && is_conn.get() {
+                    ble.try_send(BleMessage::SendCommand(Command::Brightness(100)));
+                }
             }
         },
         {
@@ -248,6 +264,8 @@ fn build_ui(app: &Application) {
             let engine = engine_fx.clone();
             let strip = strip_state_fx.clone();
             let cfg = cfg_fx.clone();
+            let is_conn = is_connected_fx.clone();
+            let ble = ble_handle_fx.clone();
             move |pct| {
                 strip.borrow_mut().brightness = pct as f64 / 100.0;
                 engine
@@ -255,6 +273,10 @@ fn build_ui(app: &Application) {
                     .set_target_brightness(pct as f64 / 100.0);
                 cfg.borrow_mut().brightness = pct;
                 let _ = cfg.borrow().save();
+
+                if is_conn.get() && matches!(engine.borrow().effect(), Effect::HardwarePattern(_)) {
+                    ble.try_send(BleMessage::SendCommand(Command::Brightness(pct)));
+                }
             }
         },
         {
@@ -272,14 +294,16 @@ fn build_ui(app: &Application) {
                     engine.borrow_mut().set_effect(Effect::HardwarePattern(idx));
                     strip.borrow_mut().effect_active = true;
 
-                    {
+                    let cur_br = {
                         let mut c = cfg.borrow_mut();
                         c.hardware_pattern = Some(idx);
                         c.effect_name = format!("HardwarePattern({})", idx);
                         let _ = c.save();
-                    }
+                        c.brightness
+                    };
 
                     if is_conn.get() {
+                        ble.try_send(BleMessage::SendCommand(Command::Brightness(cur_br)));
                         ble.try_send(BleMessage::SendCommand(Command::Pattern(idx)));
                     } else {
                         log::info!(
@@ -409,15 +433,18 @@ fn build_ui(app: &Application) {
                                     Command::PowerOff
                                 };
                                 ble_event_handle.try_send(BleMessage::SendCommand(power_command));
-                                ble_event_handle.try_send(BleMessage::SendCommand(
-                                    Command::Brightness(desired.brightness),
-                                ));
                                 if desired.powered {
                                     if let Some(pattern) = desired.hardware_pattern {
+                                        ble_event_handle.try_send(BleMessage::SendCommand(
+                                            Command::Brightness(desired.brightness),
+                                        ));
                                         ble_event_handle.try_send(BleMessage::SendCommand(
                                             Command::Pattern(pattern),
                                         ));
                                     } else {
+                                        ble_event_handle.try_send(BleMessage::SendCommand(
+                                            Command::Brightness(100),
+                                        ));
                                         ble_event_handle.try_send(BleMessage::SendCommand(
                                             Command::StaticColor {
                                                 r: desired.color_r,

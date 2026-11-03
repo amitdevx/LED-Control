@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_secs(4)).await;
 
     // Restore to comfortable static Blue
-    let blue_pkt = [0x7E, 0x07, 0x05, 0x03, 0, 0, 150, 0x10, 0xEF];
+    let blue_pkt = [0x7E, 0x00, 0x05, 0x03, 0, 0, 150, 0x00, 0xEF];
     charac.write_ext(&blue_pkt, &req).await?;
     sleep(Duration::from_millis(500)).await;
 

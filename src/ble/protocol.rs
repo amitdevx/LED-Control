@@ -191,7 +191,7 @@ impl Protocol {
             ProtocolFamily::ElkBledom => match cmd {
                 Command::StaticColor { r, g, b } => {
                     let (c1, c2, c3) = self.color_order.reorder(*r, *g, *b);
-                    Ok([0x7E, 0x07, 0x05, 0x03, c1, c2, c3, 0x10, 0xEF])
+                    Ok([0x7E, 0x00, 0x05, 0x03, c1, c2, c3, 0x00, 0xEF])
                 }
                 Command::PowerOn => Ok([0x7E, 0x04, 0x04, 0xF0, 0x00, 0x01, 0xFF, 0x00, 0xEF]),
                 Command::PowerOff => Ok([0x7E, 0x04, 0x04, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEF]),
@@ -351,7 +351,7 @@ mod tests {
                     b: 32
                 })
                 .unwrap(),
-            [0x7E, 0x07, 0x05, 0x03, 128, 64, 32, 0x10, 0xEF]
+            [0x7E, 0x00, 0x05, 0x03, 128, 64, 32, 0x00, 0xEF]
         );
         assert_eq!(
             proto.encode(&Command::PowerOn).unwrap(),
