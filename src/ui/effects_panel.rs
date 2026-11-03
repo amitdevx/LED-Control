@@ -100,49 +100,44 @@ pub fn create_effects_panel(
     hw_desc.set_wrap(true);
     container.append(&hw_desc);
 
-    // Pattern grid with named categories
+    // Pattern grid with named categories (verified for MELK-OA10 / ELK-BLEDOM)
     let pattern_categories: Vec<(&str, Vec<(u8, &str)>)> = vec![
         (
-            "Fade & Breathe",
+            "Hardware Fade & Color Flow",
             vec![
-                (1, "Pattern 1 (unverified Red Fade)"),
-                (2, "Pattern 2 (unverified Green Fade)"),
-                (3, "Pattern 3 (unverified Blue Fade)"),
-                (4, "Pattern 4 (unverified Yellow Fade)"),
-                (5, "Pattern 5 (unverified Cyan Fade)"),
-                (6, "Pattern 6 (unverified Purple Fade)"),
-                (7, "Pattern 7 (unverified White Fade)"),
-                (8, "Pattern 8 (unverified 7-Color Fade)"),
+                (144, "7-Color Fade (Fade RGB)"),
+                (16, "Rainbow Cycle"),
+                (32, "Color Wave"),
+                (48, "Breathing Flow"),
+                (137, "RGB Crossfade"),
+                (138, "7-Color Crossfade"),
             ],
         ),
         (
-            "Jump & Snap",
+            "Hardware Jump & Snap",
             vec![
-                (9, "Pattern 9 (unverified 3-Color Jump)"),
-                (10, "Pattern 10 (unverified 7-Color Jump)"),
-                (11, "Pattern 11 (unverified RGB Jump)"),
+                (128, "RGB Jump"),
+                (135, "3-Color Jump"),
+                (136, "7-Color Jump"),
             ],
         ),
         (
-            "Strobe Flash",
+            "Hardware Strobe & Blink",
             vec![
-                (12, "Pattern 12 (unverified Red Strobe)"),
-                (13, "Pattern 13 (unverified Green Strobe)"),
-                (14, "Pattern 14 (unverified Blue Strobe)"),
-                (15, "Pattern 15 (unverified Yellow Strobe)"),
-                (16, "Pattern 16 (unverified Cyan Strobe)"),
-                (17, "Pattern 17 (unverified Magenta Strobe)"),
-                (18, "Pattern 18 (unverified White Strobe)"),
+                (64, "Strobe Flash"),
+                (149, "7-Color Blink"),
+                (150, "Red Blink"),
+                (151, "Green Blink"),
+                (152, "Blue Blink"),
+                (156, "White Blink"),
             ],
         ),
         (
-            "Chase & Stream",
+            "Hardware Dynamic Modes",
             vec![
-                (20, "Pattern 20 (unverified Rainbow Chase)"),
-                (25, "Pattern 25 (unverified Pastel Stream)"),
-                (30, "Pattern 30 (unverified Fire Chase)"),
-                (40, "Pattern 40 (unverified Cyan Meteor)"),
-                (45, "Pattern 45 (unverified Comet Flow)"),
+                (0, "Auto Play All"),
+                (1, "Magic Flow"),
+                (207, "Blue Scroll"),
             ],
         ),
     ];

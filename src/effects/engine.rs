@@ -126,6 +126,10 @@ pub struct EffectEngine {
     current_r: f64,
     current_g: f64,
     current_b: f64,
+    target_r: f64,
+    target_g: f64,
+    target_b: f64,
+    transitioning: bool,
 }
 
 impl EffectEngine {
@@ -137,18 +141,17 @@ impl EffectEngine {
             current_r: 255.0,
             current_g: 0.0,
             current_b: 128.0,
+            target_r: 255.0,
+            target_g: 0.0,
+            target_b: 128.0,
+            transitioning: false,
         }
     }
 
     pub fn set_effect(&mut self, effect: Effect) {
         self.effect = effect;
         self.time = 0.0;
-        if effect == Effect::Static {
-            let br = self.params.brightness;
-            self.current_r = self.params.base_r as f64 * br;
-            self.current_g = self.params.base_g as f64 * br;
-            self.current_b = self.params.base_b as f64 * br;
-        }
+        self.transitioning = true;
     }
 
     pub fn effect(&self) -> Effect {
@@ -163,13 +166,35 @@ impl EffectEngine {
         &self.params
     }
 
+    pub fn set_target_color(&mut self, r: u8, g: u8, b: u8) {
+        self.params.base_r = r;
+        self.params.base_g = g;
+        self.params.base_b = b;
+        self.target_r = r as f64;
+        self.target_g = g as f64;
+        self.target_b = b as f64;
+        self.transitioning = true;
+    }
+
+    pub fn set_target_brightness(&mut self, brightness: f64) {
+        self.params.brightness = brightness.clamp(0.0, 1.0);
+        self.transitioning = true;
+    }
+
+    pub fn is_transitioning(&self) -> bool {
+        if self.effect != Effect::Static {
+            return true;
+        }
+        self.transitioning
+    }
+
     /// Advance time and compute the physical whole-strip output.
     /// Returns the exact (r, g, b) values to be encoded and transmitted over BLE.
     pub fn tick_whole_strip(&mut self, dt: f64) -> (u8, u8, u8) {
         self.time += dt * self.params.speed;
 
-        let (target_r, target_g, target_b) = match self.effect {
-            Effect::Static => (self.params.base_r, self.params.base_g, self.params.base_b),
+        let (mut raw_r, mut raw_g, mut raw_b) = match self.effect {
+            Effect::Static => (self.target_r, self.target_g, self.target_b),
             Effect::HueCycle => self.compute_hue_cycle(),
             Effect::Breathing => self.compute_breathing(),
             Effect::Strobe => self.compute_strobe(),
@@ -182,27 +207,46 @@ impl EffectEngine {
         };
 
         let br = self.params.brightness;
-        let mut r = target_r as f64 * br;
-        let mut g = target_g as f64 * br;
-        let mut b = target_b as f64 * br;
+        raw_r *= br;
+        raw_g *= br;
+        raw_b *= br;
 
         // Software power budget limiter for local color synthesis
         if self.params.power_limit_enabled {
-            let total = r + g + b;
+            let total = raw_r + raw_g + raw_b;
             let max_safe = 630.0;
             if total > max_safe {
                 let factor = max_safe / total;
-                r *= factor;
-                g *= factor;
-                b *= factor;
+                raw_r *= factor;
+                raw_g *= factor;
+                raw_b *= factor;
             }
         }
 
-        // Soft-start slew rate filter: prevents sudden inrush spikes
-        let slew_rate = (dt * 18.0).clamp(0.05, 1.0);
-        self.current_r += (r - self.current_r) * slew_rate;
-        self.current_g += (g - self.current_g) * slew_rate;
-        self.current_b += (b - self.current_b) * slew_rate;
+        // Frame-rate independent exponential smoothing filter:
+        // Smoothly interpolates to target with zero stepped jumps.
+        let lambda = match self.effect {
+            Effect::Static => 12.0,
+            Effect::Strobe | Effect::RainbowJump => 40.0,
+            _ => 16.0,
+        };
+        let factor = 1.0 - (-dt * lambda).exp();
+        self.current_r += (raw_r - self.current_r) * factor;
+        self.current_g += (raw_g - self.current_g) * factor;
+        self.current_b += (raw_b - self.current_b) * factor;
+
+        // Check if static transition has settled to within 0.5 unit
+        if self.effect == Effect::Static {
+            let dr = (self.current_r - raw_r).abs();
+            let dg = (self.current_g - raw_g).abs();
+            let db = (self.current_b - raw_b).abs();
+            if dr < 0.4 && dg < 0.4 && db < 0.4 {
+                self.current_r = raw_r;
+                self.current_g = raw_g;
+                self.current_b = raw_b;
+                self.transitioning = false;
+            }
+        }
 
         (
             self.current_r.round().clamp(0.0, 255.0) as u8,
@@ -236,187 +280,125 @@ impl EffectEngine {
     }
 
     /// Approximate visual simulation for controller-internal pattern preview in the GUI.
-    fn simulate_hardware_pattern(&self, idx: u8) -> (u8, u8, u8) {
+    fn simulate_hardware_pattern(&self, idx: u8) -> (f64, f64, f64) {
         match idx {
-            1 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                ((255.0 * factor) as u8, 0, 0)
-            }
-            2 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                (0, (255.0 * factor) as u8, 0)
-            }
-            3 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                (0, 0, (255.0 * factor) as u8)
-            }
-            4 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                ((255.0 * factor) as u8, (255.0 * factor) as u8, 0)
-            }
-            5 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                (0, (255.0 * factor) as u8, (255.0 * factor) as u8)
-            }
-            6 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                ((255.0 * factor) as u8, 0, (255.0 * factor) as u8)
-            }
-            7 => {
-                let factor = ((self.time * 2.5).sin() + 1.0) / 2.0;
-                let v = (255.0 * factor) as u8;
-                (v, v, v)
-            }
-            8 => {
+            16 => self.compute_hue_cycle(),
+            32 => self.compute_cool_fade(),
+            48 => self.compute_breathing(),
+            64 => self.compute_strobe(),
+            128 | 135 | 136 => self.compute_rainbow_jump(),
+            137 | 138 | 144 => {
                 let cycle_secs = 8.0;
                 let hue = ((self.time % cycle_secs) / cycle_secs * 360.0) as f32;
                 let hsl = Hsl::new(hue, 1.0, 0.5);
                 let rgb = Srgb::from_color(hsl);
                 (
-                    (rgb.red * 255.0) as u8,
-                    (rgb.green * 255.0) as u8,
-                    (rgb.blue * 255.0) as u8,
+                    rgb.red as f64 * 255.0,
+                    rgb.green as f64 * 255.0,
+                    rgb.blue as f64 * 255.0,
                 )
             }
-            9 => {
-                let colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)];
-                let step = ((self.time * 2.5) as usize) % colors.len();
-                colors[step]
-            }
-            10 | 11 => {
-                let colors = [
-                    (255, 0, 0),
-                    (255, 128, 0),
-                    (255, 235, 0),
-                    (0, 255, 0),
-                    (0, 220, 255),
-                    (0, 0, 255),
-                    (255, 0, 200),
-                ];
-                let step = ((self.time * 2.5) as usize) % colors.len();
-                colors[step]
-            }
-            12..=19 => {
-                let on = ((self.time * 6.0) % 1.0) < 0.45;
-                if on {
-                    match idx {
-                        12 => (255, 0, 0),
-                        13 => (0, 255, 0),
-                        14 => (0, 0, 255),
-                        15 => (255, 255, 0),
-                        16 => (0, 255, 255),
-                        17 => (255, 0, 255),
-                        _ => (255, 255, 255),
-                    }
-                } else {
-                    (0, 0, 0)
-                }
-            }
-            _ => {
-                let hue = ((self.time * 120.0 + idx as f64 * 12.0) % 360.0) as f32;
-                let hsl = Hsl::new(hue, 1.0, 0.5);
-                let rgb = Srgb::from_color(hsl);
-                (
-                    (rgb.red * 255.0) as u8,
-                    (rgb.green * 255.0) as u8,
-                    (rgb.blue * 255.0) as u8,
-                )
-            }
+            _ => (
+                self.params.base_r as f64,
+                self.params.base_g as f64,
+                self.params.base_b as f64,
+            ),
         }
     }
 
-    fn compute_hue_cycle(&self) -> (u8, u8, u8) {
-        let cycle_secs = 30.0;
+    fn compute_hue_cycle(&self) -> (f64, f64, f64) {
+        let cycle_secs = 24.0;
         let hue = ((self.time % cycle_secs) / cycle_secs * 360.0) as f32;
         let hsl = Hsl::new(hue, 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
-            (rgb.red * 255.0) as u8,
-            (rgb.green * 255.0) as u8,
-            (rgb.blue * 255.0) as u8,
+            rgb.red as f64 * 255.0,
+            rgb.green as f64 * 255.0,
+            rgb.blue as f64 * 255.0,
         )
     }
 
-    fn compute_breathing(&self) -> (u8, u8, u8) {
+    fn compute_breathing(&self) -> (f64, f64, f64) {
         let phase = (self.time * std::f64::consts::TAU / 4.0).sin();
         let factor = (phase + 1.0) / 2.0;
         (
-            (self.params.base_r as f64 * factor) as u8,
-            (self.params.base_g as f64 * factor) as u8,
-            (self.params.base_b as f64 * factor) as u8,
+            self.params.base_r as f64 * factor,
+            self.params.base_g as f64 * factor,
+            self.params.base_b as f64 * factor,
         )
     }
 
-    fn compute_strobe(&self) -> (u8, u8, u8) {
+    fn compute_strobe(&self) -> (f64, f64, f64) {
         let on = ((self.time * 4.0) % 1.0) < 0.5;
         if on {
-            (self.params.base_r, self.params.base_g, self.params.base_b)
+            (
+                self.params.base_r as f64,
+                self.params.base_g as f64,
+                self.params.base_b as f64,
+            )
         } else {
-            (0, 0, 0)
+            (0.0, 0.0, 0.0)
         }
     }
 
-    fn compute_warm_fade(&self) -> (u8, u8, u8) {
-        let cycle_secs = 8.0;
-        let hue = ((self.time % cycle_secs) / cycle_secs * 60.0) as f32;
+    fn compute_warm_fade(&self) -> (f64, f64, f64) {
+        let cycle_secs = 6.0;
+        let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
+        let factor = (phase + 1.0) / 2.0;
+        let hue = (factor * 55.0) as f32;
         let hsl = Hsl::new(hue, 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
-            (rgb.red * 255.0) as u8,
-            (rgb.green * 255.0) as u8,
-            (rgb.blue * 255.0) as u8,
+            rgb.red as f64 * 255.0,
+            rgb.green as f64 * 255.0,
+            rgb.blue as f64 * 255.0,
         )
     }
 
-    fn compute_cool_fade(&self) -> (u8, u8, u8) {
-        let cycle_secs = 8.0;
-        let t = (self.time % cycle_secs) / cycle_secs;
-        let hue = (200.0 + t * 120.0) as f32;
-        let hsl = Hsl::new(hue % 360.0, 1.0, 0.5);
+    fn compute_cool_fade(&self) -> (f64, f64, f64) {
+        let cycle_secs = 6.0;
+        let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
+        let factor = (phase + 1.0) / 2.0;
+        let hue = (190.0 + factor * 80.0) as f32;
+        let hsl = Hsl::new(hue, 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
-            (rgb.red * 255.0) as u8,
-            (rgb.green * 255.0) as u8,
-            (rgb.blue * 255.0) as u8,
+            rgb.red as f64 * 255.0,
+            rgb.green as f64 * 255.0,
+            rgb.blue as f64 * 255.0,
         )
     }
 
-    fn compute_rainbow_jump(&self) -> (u8, u8, u8) {
+    fn compute_rainbow_jump(&self) -> (f64, f64, f64) {
         let rainbow_hues: [f32; 7] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0];
         let step = (self.time * 2.0) as usize % rainbow_hues.len();
         let hsl = Hsl::new(rainbow_hues[step], 1.0, 0.5);
         let rgb = Srgb::from_color(hsl);
         (
-            (rgb.red * 255.0) as u8,
-            (rgb.green * 255.0) as u8,
-            (rgb.blue * 255.0) as u8,
+            rgb.red as f64 * 255.0,
+            rgb.green as f64 * 255.0,
+            rgb.blue as f64 * 255.0,
         )
     }
 
-    fn compute_candle_flicker(&self) -> (u8, u8, u8) {
+    fn compute_candle_flicker(&self) -> (f64, f64, f64) {
         let f1 = (self.time * 7.3).sin() * 0.15;
         let f2 = (self.time * 13.7).sin() * 0.10;
         let f3 = (self.time * 23.1).sin() * 0.05;
         let factor = (0.70 + f1 + f2 + f3).clamp(0.0, 1.0);
 
-        let r = (255.0 * factor) as u8;
-        let g = (140.0 * factor * 0.85) as u8;
-        let b = (20.0 * factor * 0.4) as u8;
-        (r, g, b)
+        (255.0 * factor, 140.0 * factor * 0.85, 20.0 * factor * 0.4)
     }
 
-    fn compute_cross_fade(&self) -> (u8, u8, u8) {
+    fn compute_cross_fade(&self) -> (f64, f64, f64) {
         let cycle_secs = 6.0;
-        let t = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
-        let factor = (t + 1.0) / 2.0;
-
-        let r =
-            (self.params.base_r as f64 * (1.0 - factor) + self.params.alt_r as f64 * factor) as u8;
-        let g =
-            (self.params.base_g as f64 * (1.0 - factor) + self.params.alt_g as f64 * factor) as u8;
-        let b =
-            (self.params.base_b as f64 * (1.0 - factor) + self.params.alt_b as f64 * factor) as u8;
-        (r, g, b)
+        let phase = ((self.time % cycle_secs) / cycle_secs * std::f64::consts::TAU).sin();
+        let factor = (phase + 1.0) / 2.0;
+        (
+            self.params.base_r as f64 * (1.0 - factor) + self.params.alt_r as f64 * factor,
+            self.params.base_g as f64 * (1.0 - factor) + self.params.alt_g as f64 * factor,
+            self.params.base_b as f64 * (1.0 - factor) + self.params.alt_b as f64 * factor,
+        )
     }
 }
 

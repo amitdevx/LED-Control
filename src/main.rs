@@ -175,8 +175,6 @@ fn build_ui(app: &Application) {
 
     // 1. Color Picker tab
     let strip_state_col = strip_state.clone();
-    let ble_handle_col = ble_handle.clone();
-    let is_connected_col = is_connected.clone();
     let engine_col = engine.clone();
     let music_act_col = music_active.clone();
     let ensure_pwr_col = ensure_powered.clone();
@@ -184,13 +182,16 @@ fn build_ui(app: &Application) {
 
     let (color_picker_box, color_handle) = ui::create_color_picker(move |r, g, b| {
         ensure_pwr_col();
-        engine_col.borrow_mut().set_effect(Effect::Static);
+        {
+            let mut eng = engine_col.borrow_mut();
+            eng.set_target_color(r, g, b);
+            eng.set_effect(Effect::Static);
+        }
         music_act_col.set(false);
 
         {
             let mut s = strip_state_col.borrow_mut();
-            s.set_all_leds(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
-            s.effect_active = false;
+            s.effect_active = true;
         }
 
         {
@@ -201,10 +202,6 @@ fn build_ui(app: &Application) {
             c.effect_name = "Static".into();
             c.hardware_pattern = None;
             let _ = c.save();
-        }
-
-        if is_connected_col.get() {
-            ble_handle_col.try_send(BleMessage::SendCommand(Command::StaticColor { r, g, b }));
         }
     });
 
@@ -248,17 +245,16 @@ fn build_ui(app: &Application) {
             }
         },
         {
-            let ble = ble_handle_fx.clone();
+            let engine = engine_fx.clone();
             let strip = strip_state_fx.clone();
-            let is_conn = is_connected_fx.clone();
             let cfg = cfg_fx.clone();
             move |pct| {
                 strip.borrow_mut().brightness = pct as f64 / 100.0;
+                engine
+                    .borrow_mut()
+                    .set_target_brightness(pct as f64 / 100.0);
                 cfg.borrow_mut().brightness = pct;
                 let _ = cfg.borrow().save();
-                if is_conn.get() {
-                    ble.try_send(BleMessage::SendCommand(Command::Brightness(pct)));
-                }
             }
         },
         {
@@ -503,6 +499,7 @@ fn build_ui(app: &Application) {
     let is_conn_tick = is_connected.clone();
     let mut last_tick = std::time::Instant::now();
     let mut last_send = std::time::Instant::now();
+    let mut last_sent_color: Option<(u8, u8, u8)> = None;
 
     glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
         let now = std::time::Instant::now();
@@ -516,33 +513,52 @@ fn build_ui(app: &Application) {
                 s.set_all_leds(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
             }
 
-            // Sync to BLE hardware only if connected (throttled to 10 Hz rate limit)
+            // Sync to BLE hardware only if connected (fluid 30 fps streaming)
             if is_conn_tick.get()
-                && now.duration_since(last_send) >= std::time::Duration::from_millis(100)
+                && now.duration_since(last_send) >= std::time::Duration::from_millis(33)
+                && last_sent_color != Some((r, g, b))
             {
                 last_send = now;
+                last_sent_color = Some((r, g, b));
                 ble_tick.try_send(BleMessage::SendCommand(Command::StaticColor { r, g, b }));
             }
         } else {
             let mut eng = engine_tick.borrow_mut();
             let current_effect = eng.effect();
-            if current_effect != Effect::Static {
-                let (r, g, b) = eng.tick(dt);
-                let leds = eng.compute_strip_leds::<{ ui::SMD_COUNT }>();
-                {
-                    let mut s = strip_tick.borrow_mut();
-                    s.led_colors = leds;
-                }
+            let is_hw_pattern = matches!(current_effect, Effect::HardwarePattern(_));
 
-                // Sync to BLE hardware only for software effects!
-                // For HardwarePattern, the physical strip microchip runs the pattern autonomously.
-                if !matches!(current_effect, Effect::HardwarePattern(_))
-                    && is_conn_tick.get()
-                    && now.duration_since(last_send) >= std::time::Duration::from_millis(100)
-                {
-                    last_send = now;
-                    ble_tick.try_send(BleMessage::SendCommand(Command::StaticColor { r, g, b }));
+            if !is_hw_pattern {
+                let is_transitioning = eng.is_transitioning();
+                if current_effect != Effect::Static || is_transitioning {
+                    let (r, g, b) = eng.tick(dt);
+                    let leds = eng.compute_strip_leds::<{ ui::SMD_COUNT }>();
+                    {
+                        let mut s = strip_tick.borrow_mut();
+                        s.led_colors = leds;
+                        if !is_transitioning && current_effect == Effect::Static {
+                            s.effect_active = false;
+                        }
+                    }
+
+                    // Sync to BLE hardware for software effects and smooth transitions (fluid 30 fps)
+                    if is_conn_tick.get()
+                        && now.duration_since(last_send) >= std::time::Duration::from_millis(33)
+                        && last_sent_color != Some((r, g, b))
+                    {
+                        last_send = now;
+                        last_sent_color = Some((r, g, b));
+                        ble_tick.try_send(BleMessage::SendCommand(Command::StaticColor {
+                            r,
+                            g,
+                            b,
+                        }));
+                    }
                 }
+            } else {
+                let _ = eng.tick(dt);
+                let leds = eng.compute_strip_leds::<{ ui::SMD_COUNT }>();
+                let mut s = strip_tick.borrow_mut();
+                s.led_colors = leds;
             }
         }
         glib::ControlFlow::Continue

@@ -831,14 +831,6 @@ impl BleWorker {
             Ok(()) => {
                 let with_response = write_mode == WriteMode::WithResponse;
                 self.emit_event(BleEvent::CommandSent { with_response });
-                if let Some(device) = self.device.clone() {
-                    if !device.is_connected().await.unwrap_or(false) && !self.manual_disconnect {
-                        let _ = self
-                            .internal_tx
-                            .send(WorkerEvent::ConnectionLost(self.connection_generation))
-                            .await;
-                    }
-                }
             }
             Err(error) => {
                 let message = format!("BLE write failed using {write_mode:?}: {error}");
