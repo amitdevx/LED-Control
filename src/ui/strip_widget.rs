@@ -1,5 +1,5 @@
 // ponytail: LED strip visualization widget for desktop simulation.
-// Note: The physical One94Store 5m strip operates as a uniform whole-strip bus.
+// Note: The physical MELK-OA10 5m strip operates as a uniform whole-strip bus.
 // This widget renders 28 preview segments on screen as a desktop visual simulator,
 // not a representation of individually addressable physical hardware LEDs.
 

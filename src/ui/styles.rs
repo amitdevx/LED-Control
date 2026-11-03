@@ -75,6 +75,39 @@ pub fn app_css() -> &'static str {
         margin-bottom: 8px;
     }
 
+    /* == Global Brightness Card & Presets == */
+    .brightness-card {
+        background-color: #141724;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
+        padding: 10px 16px;
+        margin-bottom: 8px;
+    }
+
+    .brightness-preset-btn {
+        font-family: monospace;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 6px 10px;
+        border-radius: 6px;
+        background-color: #1a1e30;
+        color: #cbd5e1;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+    }
+
+    .brightness-preset-btn:hover {
+        background-color: #242b45;
+        color: #ffffff;
+        border-color: rgba(56, 189, 248, 0.4);
+    }
+
+    .brightness-preset-btn.active {
+        background-color: #2563eb;
+        color: #ffffff;
+        border-color: #38bdf8;
+    }
+
     /* == Notebook Tabs Navigation == */
     notebook {
         background-color: transparent;

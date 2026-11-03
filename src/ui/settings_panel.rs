@@ -26,9 +26,9 @@ pub fn create_settings_panel(
     container.append(&order_label);
 
     let order_desc = Label::new(Some(
-        "Different strip models wire color channels differently. \
-         The One94Store SR-SMD-SM uses RBG order (green and blue swapped). \
-         Use the test buttons below to calibrate.",
+        "Different strip controllers wire color channels differently. \
+         The MELK-OA10 controller uses native RGB order. \
+         Use the test buttons below to calibrate if channels ever differ.",
     ));
     order_desc.add_css_class("dim-label");
     order_desc.set_halign(gtk::Align::Start);
@@ -196,11 +196,13 @@ pub fn create_settings_panel(
     container.append(&about_label);
 
     let about_text = Label::new(Some(
-        "Model: One94Store SR-SMD-SM (ASIN: B0FTQ5Q7BZ)\n\
-         Length: 5 Metres / Flexible SMD 5050 RGB Strip\n\
-         Supported Controllers: MELK / ELK-BLEDOM (0xFFF0/0xFFF3) & LEDDMX-* (0xFFE0/0xFFE1)\n\
-         Protocols: 9-byte frames (0x7E...0xEF / 0x7B...0xBF)\n\
-         Auto-detection: Active on connection",
+        "Controller: MELK-OA10 (ELK-BLEDOM Chipset Family)\n\
+         Device Address: BE:69:DF:01:46:00\n\
+         GATT Service: 0000fff0-0000-1000-8000-00805f9b34fb\n\
+         Write Characteristic: 0000fff3-0000-1000-8000-00805f9b34fb\n\
+         Notify Characteristic: 0000fff4-0000-1000-8000-00805f9b34fb (CSZGP10Y69KHPV06)\n\
+         Channel Order: RGB (Native Red-Green-Blue)\n\
+         Protocol: 9-byte ELK frames (0x7E...0xEF)",
     ));
     about_text.add_css_class("dim-label");
     about_text.set_halign(gtk::Align::Start);

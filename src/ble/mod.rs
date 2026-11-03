@@ -3,13 +3,13 @@
 
 mod protocol;
 
+pub use bluer::Address;
 pub use protocol::{ColorOrder, Command, Protocol, ProtocolFamily};
 
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
 use bluer::{
-    Adapter, AdapterEvent, Address, Device, DeviceEvent, DiscoveryFilter, DiscoveryTransport,
-    Session,
+    Adapter, AdapterEvent, Device, DeviceEvent, DiscoveryFilter, DiscoveryTransport, Session,
 };
 use futures::StreamExt;
 use log::{debug, error, info, warn};

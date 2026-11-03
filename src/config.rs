@@ -22,15 +22,15 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             color_r: 255,
-            color_g: 0,
-            color_b: 128,
+            color_g: 255,
+            color_b: 255,
             brightness: 100,
-            powered: false, // Default to standby (unpowered) until user activates
-            color_order: "RBG".to_string(), // Default One94Store channel order
+            powered: true,                  // Default to powered ON
+            color_order: "RGB".to_string(), // Configured for MELK-OA10 native channel order
             effect_name: "Static".to_string(),
             hardware_pattern: None,
             power_limit: true,
-            last_device_address: None,
+            last_device_address: Some("BE:69:DF:01:46:00".to_string()),
         }
     }
 }
@@ -82,10 +82,10 @@ impl AppConfig {
 
         if crate::ble::ColorOrder::from_str_name(&self.color_order).is_none() {
             log::warn!(
-                "Loaded invalid color order '{}', resetting to default RBG",
+                "Loaded invalid color order '{}', resetting to default RGB",
                 self.color_order
             );
-            self.color_order = "RBG".to_string();
+            self.color_order = "RGB".to_string();
         }
 
         if let Some(pat) = self.hardware_pattern {
@@ -171,7 +171,7 @@ mod tests {
         cfg.validate_and_sanitize();
 
         assert_eq!(cfg.brightness, 100);
-        assert_eq!(cfg.color_order, "RBG");
+        assert_eq!(cfg.color_order, "RGB");
         assert_eq!(cfg.hardware_pattern, None);
         assert_eq!(cfg.last_device_address, None);
     }

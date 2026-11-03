@@ -6,8 +6,8 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorOrder {
-    Rgb,
     #[default]
+    Rgb,
     Rbg,
     Grb,
     Gbr,
@@ -29,8 +29,8 @@ impl ColorOrder {
 
     pub fn label(&self) -> &'static str {
         match self {
-            ColorOrder::Rgb => "RGB",
-            ColorOrder::Rbg => "RBG (One94Store Default)",
+            ColorOrder::Rgb => "RGB (MELK-OA10 Default)",
+            ColorOrder::Rbg => "RBG",
             ColorOrder::Grb => "GRB",
             ColorOrder::Gbr => "GBR",
             ColorOrder::Brg => "BRG",
@@ -63,8 +63,8 @@ impl ColorOrder {
 
     pub fn all() -> &'static [ColorOrder] {
         &[
-            ColorOrder::Rbg,
             ColorOrder::Rgb,
+            ColorOrder::Rbg,
             ColorOrder::Grb,
             ColorOrder::Gbr,
             ColorOrder::Brg,
@@ -112,8 +112,8 @@ impl std::error::Error for ProtocolError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProtocolFamily {
     #[default]
-    Leddmdx,
     ElkBledom,
+    Leddmdx,
 }
 
 impl ProtocolFamily {
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!(ColorOrder::parse("rgb"), Ok(ColorOrder::Rgb));
         assert_eq!(ColorOrder::parse("RBG"), Ok(ColorOrder::Rbg));
         assert_eq!(
-            ColorOrder::parse("RBG (One94Store Default)"),
-            Ok(ColorOrder::Rbg)
+            ColorOrder::parse("RGB (MELK-OA10 Default)"),
+            Ok(ColorOrder::Rgb)
         );
         assert_eq!(ColorOrder::parse("grb"), Ok(ColorOrder::Grb));
         assert_eq!(ColorOrder::parse("GBR"), Ok(ColorOrder::Gbr));
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_static_color_rbg_order() {
-        let proto = Protocol::new(ColorOrder::Rbg);
+        let proto = Protocol::with_family(ColorOrder::Rbg, ProtocolFamily::Leddmdx);
         assert_eq!(
             proto
                 .encode(&Command::StaticColor { r: 0, g: 255, b: 0 })
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_power_frames() {
-        let proto = Protocol::new(ColorOrder::Rbg);
+        let proto = Protocol::with_family(ColorOrder::Rbg, ProtocolFamily::Leddmdx);
         assert_eq!(
             proto.encode(&Command::PowerOn).unwrap(),
             [0x7B, 0xFF, 0x04, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_static_color_is_not_mutated() {
-        let proto = Protocol::new(ColorOrder::Rgb);
+        let proto = Protocol::with_family(ColorOrder::Rgb, ProtocolFamily::Leddmdx);
         assert_eq!(
             proto
                 .encode(&Command::StaticColor {
@@ -285,7 +285,7 @@ mod tests {
             (ColorOrder::Bgr, [30, 20, 10]),
         ];
         for (order, channels) in expected {
-            let frame = Protocol::new(order)
+            let frame = Protocol::with_family(order, ProtocolFamily::Leddmdx)
                 .encode(&Command::StaticColor {
                     r: 10,
                     g: 20,
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_brightness_frames_and_boundaries() {
-        let proto = Protocol::new(ColorOrder::Rbg);
+        let proto = Protocol::with_family(ColorOrder::Rbg, ProtocolFamily::Leddmdx);
         assert_eq!(
             proto.encode(&Command::Brightness(0)).unwrap(),
             [0x7B, 0xFF, 0x01, 0, 0, 0x00, 0xFF, 0xFF, 0xBF]
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_pattern_frames_and_boundaries() {
-        let proto = Protocol::new(ColorOrder::Rbg);
+        let proto = Protocol::with_family(ColorOrder::Rbg, ProtocolFamily::Leddmdx);
         assert_eq!(
             proto.encode(&Command::Pattern(0)).unwrap(),
             [0x7B, 0xFF, 0x03, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]

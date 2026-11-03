@@ -1,4 +1,4 @@
-// ponytail: LED Controller for One94Store 5M Smart RGB LED Strip Light (ASIN B0FTQ5Q7BZ / SR-SMD-SM).
+// ponytail: LED Controller for MELK-OA10 Smart RGB LED Strip Light (ELK-BLEDOM family).
 // High-performance native Linux desktop GUI using GTK4, Cairo, and BlueZ (bluer).
 // Strictly zero emojis and zero em-dashes.
 
@@ -7,7 +7,7 @@ mod config;
 mod effects;
 mod ui;
 
-use ble::{BleEvent, BleMessage, BleWorker, ColorOrder, Command, ConnectionState};
+use ble::{Address, BleEvent, BleMessage, BleWorker, ColorOrder, Command, ConnectionState};
 use config::AppConfig;
 use effects::{Effect, EffectEngine, MusicEngine};
 use gtk::prelude::*;
@@ -62,9 +62,9 @@ fn build_ui(app: &Application) {
 
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("One94Store LED Strip Controller")
+        .title("MELK-OA10 Smart RGB LED Controller")
         .default_width(680)
-        .default_height(780)
+        .default_height(820)
         .build();
 
     let root_box = Box::new(Orientation::Vertical, 10);
@@ -135,12 +135,20 @@ fn build_ui(app: &Application) {
     // Configure initial BLE parameters
     let initial_order = ColorOrder::from_str_name(&cfg_init.color_order).unwrap_or_else(|| {
         log::warn!(
-            "Unrecognized color order '{}' in config, falling back to default RBG",
+            "Unrecognized color order '{}' in config, falling back to default RGB",
             cfg_init.color_order
         );
         ColorOrder::default()
     });
     ble_handle.try_send(BleMessage::SetColorOrder(initial_order));
+
+    // Auto-connect to saved MELK-OA10 LED controller on launch
+    if let Some(ref addr_str) = cfg_init.last_device_address {
+        if let Ok(addr) = addr_str.parse::<Address>() {
+            log::info!("Auto-connecting to saved MELK-OA10 controller at {addr}");
+            ble_handle.try_send(BleMessage::Connect(addr));
+        }
+    }
 
     // Helper to automatically wake / turn on power if user interacts with controls
     let ensure_powered = {
@@ -171,6 +179,35 @@ fn build_ui(app: &Application) {
             }
         })
     };
+
+    // Master Brightness Control Bar (Directly below strip preview, visible globally across all modes)
+    let strip_state_br = strip_state.clone();
+    let engine_br = engine.clone();
+    let ble_handle_br = ble_handle.clone();
+    let is_connected_br = is_connected.clone();
+    let cfg_br = config.clone();
+    let ensure_pwr_br = ensure_powered.clone();
+
+    let (brightness_box, _brightness_handle) =
+        ui::create_brightness_control(cfg_init.brightness, move |pct| {
+            if pct > 0 {
+                ensure_pwr_br();
+            }
+            strip_state_br.borrow_mut().brightness = pct as f64 / 100.0;
+            engine_br
+                .borrow_mut()
+                .set_target_brightness(pct as f64 / 100.0);
+            cfg_br.borrow_mut().brightness = pct;
+            let _ = cfg_br.borrow().save();
+
+            if is_connected_br.get() {
+                let eff = engine_br.borrow().effect();
+                if matches!(eff, Effect::HardwarePattern(_)) {
+                    ble_handle_br.try_send(BleMessage::SendCommand(Command::Brightness(pct)));
+                }
+            }
+        });
+    root_box.append(&brightness_box);
 
     // Notebook tabs for clean organization
     let notebook = Notebook::new();
@@ -219,7 +256,46 @@ fn build_ui(app: &Application) {
     let col_tab_label = gtk::Label::new(Some("Colors"));
     notebook.append_page(&color_picker_box, Some(&col_tab_label));
 
-    // 2. Effects & Patterns tab
+    // 2. Hardware Modes tab (Verified built-in microchip routines running directly on MELK-OA10)
+    let ble_handle_hw = ble_handle.clone();
+    let engine_hw = engine.clone();
+    let strip_state_hw = strip_state.clone();
+    let is_connected_hw = is_connected.clone();
+    let music_act_hw = music_active.clone();
+    let ensure_pwr_hw = ensure_powered.clone();
+    let cfg_hw = config.clone();
+
+    let (hw_box, _hw_handle) = ui::create_hardware_modes_panel(move |idx| {
+        if idx <= 210 {
+            ensure_pwr_hw();
+            music_act_hw.set(false);
+            engine_hw
+                .borrow_mut()
+                .set_effect(Effect::HardwarePattern(idx));
+            strip_state_hw.borrow_mut().effect_active = true;
+
+            let cur_br = {
+                let mut c = cfg_hw.borrow_mut();
+                c.hardware_pattern = Some(idx);
+                c.effect_name = format!("HardwarePattern({})", idx);
+                let _ = c.save();
+                c.brightness
+            };
+
+            if is_connected_hw.get() {
+                ble_handle_hw.try_send(BleMessage::SendCommand(Command::Brightness(cur_br)));
+                ble_handle_hw.try_send(BleMessage::SendCommand(Command::Pattern(idx)));
+            } else {
+                log::info!(
+                    "Hardware pattern {idx} selected in local preview; will transmit to strip once BLE connects"
+                );
+            }
+        }
+    });
+    let hw_tab_label = gtk::Label::new(Some("Hardware Modes"));
+    notebook.append_page(&hw_box, Some(&hw_tab_label));
+
+    // 3. Dynamic Effects tab (PC software streaming animations)
     let ble_handle_fx = ble_handle.clone();
     let engine_fx = engine.clone();
     let strip_state_fx = strip_state.clone();
@@ -228,7 +304,7 @@ fn build_ui(app: &Application) {
     let ensure_pwr_fx = ensure_powered.clone();
     let cfg_fx = config.clone();
 
-    let (effects_box, fx_handle) = ui::create_effects_panel(
+    let (effects_box, _fx_handle) = ui::create_dynamic_effects_panel(
         {
             let engine = engine_fx.clone();
             let strip = strip_state_fx.clone();
@@ -260,63 +336,8 @@ fn build_ui(app: &Application) {
                 engine.borrow_mut().set_params(params.clone());
             }
         },
-        {
-            let engine = engine_fx.clone();
-            let strip = strip_state_fx.clone();
-            let cfg = cfg_fx.clone();
-            let is_conn = is_connected_fx.clone();
-            let ble = ble_handle_fx.clone();
-            move |pct| {
-                strip.borrow_mut().brightness = pct as f64 / 100.0;
-                engine
-                    .borrow_mut()
-                    .set_target_brightness(pct as f64 / 100.0);
-                cfg.borrow_mut().brightness = pct;
-                let _ = cfg.borrow().save();
-
-                if is_conn.get() && matches!(engine.borrow().effect(), Effect::HardwarePattern(_)) {
-                    ble.try_send(BleMessage::SendCommand(Command::Brightness(pct)));
-                }
-            }
-        },
-        {
-            let ble = ble_handle_fx.clone();
-            let is_conn = is_connected_fx.clone();
-            let engine = engine_fx.clone();
-            let strip = strip_state_fx.clone();
-            let music_act = music_act_fx.clone();
-            let ensure_pwr = ensure_pwr_fx.clone();
-            let cfg = cfg_fx.clone();
-            move |idx| {
-                if idx <= 210 {
-                    ensure_pwr();
-                    music_act.set(false);
-                    engine.borrow_mut().set_effect(Effect::HardwarePattern(idx));
-                    strip.borrow_mut().effect_active = true;
-
-                    let cur_br = {
-                        let mut c = cfg.borrow_mut();
-                        c.hardware_pattern = Some(idx);
-                        c.effect_name = format!("HardwarePattern({})", idx);
-                        let _ = c.save();
-                        c.brightness
-                    };
-
-                    if is_conn.get() {
-                        ble.try_send(BleMessage::SendCommand(Command::Brightness(cur_br)));
-                        ble.try_send(BleMessage::SendCommand(Command::Pattern(idx)));
-                    } else {
-                        log::info!(
-                            "Hardware pattern {idx} selected in local preview; will transmit to strip once BLE connects"
-                        );
-                    }
-                }
-            }
-        },
     );
-
-    (fx_handle.set_brightness)(cfg_init.brightness);
-    let fx_tab_label = gtk::Label::new(Some("Effects"));
+    let fx_tab_label = gtk::Label::new(Some("Dynamic Effects"));
     notebook.append_page(&effects_box, Some(&fx_tab_label));
 
     // 3. Music Sync tab
@@ -534,7 +555,11 @@ fn build_ui(app: &Application) {
         last_tick = now;
 
         if music_active_tick.get() {
-            let (r, g, b) = music_engine_tick.borrow_mut().tick(dt);
+            let (raw_r, raw_g, raw_b) = music_engine_tick.borrow_mut().tick(dt);
+            let br = engine_tick.borrow().params().brightness;
+            let r = (raw_r as f64 * br).round().clamp(0.0, 255.0) as u8;
+            let g = (raw_g as f64 * br).round().clamp(0.0, 255.0) as u8;
+            let b = (raw_b as f64 * br).round().clamp(0.0, 255.0) as u8;
             {
                 let mut s = strip_tick.borrow_mut();
                 s.set_all_leds(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
