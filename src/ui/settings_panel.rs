@@ -198,9 +198,9 @@ pub fn create_settings_panel(
     let about_text = Label::new(Some(
         "Model: One94Store SR-SMD-SM (ASIN: B0FTQ5Q7BZ)\n\
          Length: 5 Metres / Flexible SMD 5050 RGB Strip\n\
-         Controller family: LEDDMX-*\n\
-         Protocol: 9-byte frames (0x7B ... 0xBF)\n\
-         GATT Service: 0xFFE0 / Characteristic: 0xFFE1",
+         Supported Controllers: MELK / ELK-BLEDOM (0xFFF0/0xFFF3) & LEDDMX-* (0xFFE0/0xFFE1)\n\
+         Protocols: 9-byte frames (0x7E...0xEF / 0x7B...0xBF)\n\
+         Auto-detection: Active on connection",
     ));
     about_text.add_css_class("dim-label");
     about_text.set_halign(gtk::Align::Start);

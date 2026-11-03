@@ -3,7 +3,7 @@
 
 mod protocol;
 
-pub use protocol::{ColorOrder, Command, Protocol};
+pub use protocol::{ColorOrder, Command, Protocol, ProtocolFamily};
 
 use bluer::gatt::remote::{Characteristic, CharacteristicWriteRequest};
 use bluer::gatt::WriteOp;
@@ -21,9 +21,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-const SERVICE_UUID: Uuid = Uuid::from_u128(0x0000ffe0_0000_1000_8000_00805f9b34fb);
-const CHAR_UUID: Uuid = Uuid::from_u128(0x0000ffe1_0000_1000_8000_00805f9b34fb);
-const DEVICE_NAME_PREFIXES: &[&str] = &["LEDDMX", "LED DMX", "LED-DMX"];
+const FFF0_SERVICE_UUID: Uuid = Uuid::from_u128(0x0000fff0_0000_1000_8000_00805f9b34fb);
+const FFF3_CHAR_UUID: Uuid = Uuid::from_u128(0x0000fff3_0000_1000_8000_00805f9b34fb);
+
+const FFE0_SERVICE_UUID: Uuid = Uuid::from_u128(0x0000ffe0_0000_1000_8000_00805f9b34fb);
+const FFE1_CHAR_UUID: Uuid = Uuid::from_u128(0x0000ffe1_0000_1000_8000_00805f9b34fb);
+
+const DEVICE_NAME_PREFIXES: &[&str] = &["MELK", "ELK", "LEDDMX", "LED DMX", "LED-DMX"];
 const MAX_RECONNECT_ATTEMPTS: u8 = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SCAN_DURATION: Duration = Duration::from_secs(8);
@@ -88,6 +92,7 @@ enum WorkerEvent {
         characteristic: Characteristic,
         write_mode: WriteMode,
         name: String,
+        family: ProtocolFamily,
     },
     ConnectFailed {
         generation: u64,
@@ -350,6 +355,7 @@ impl BleWorker {
                 characteristic,
                 write_mode,
                 name,
+                family,
             } => {
                 if generation != self.connection_generation || self.manual_disconnect {
                     debug!(
@@ -363,6 +369,7 @@ impl BleWorker {
                 self.device = Some(device.clone());
                 self.characteristic = Some(characteristic);
                 self.write_mode = Some(write_mode);
+                self.protocol.set_family(family);
                 let address = device.address();
                 self.reconnect_address = Some(address);
                 self.reconnect_attempt = 0;
@@ -370,7 +377,7 @@ impl BleWorker {
                 self.start_connection_monitor(device, generation).await;
                 self.emit_state(ConnectionState::Ready(name.clone()));
                 info!(
-                    "BLE controller ready name={name} address={address} write_mode={write_mode:?} gen={generation}"
+                    "BLE controller ready name={name} address={address} write_mode={write_mode:?} family={family:?} gen={generation}"
                 );
             }
             WorkerEvent::ConnectFailed {
@@ -586,7 +593,24 @@ impl BleWorker {
             info!("Connecting to BLE controller {name} at {address} (gen={generation})");
 
             let connect_future = async {
+                if device.name().await.is_err() {
+                    if let Ok(discover) = adapter.discover_devices().await {
+                        for _ in 0..10 {
+                            if device.name().await.is_ok() {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                        }
+                        drop(discover);
+                    }
+                }
                 device.connect().await?;
+                for _ in 0..15 {
+                    if device.is_services_resolved().await.unwrap_or(false) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
                 Ok::<(), bluer::Error>(())
             };
 
@@ -625,7 +649,7 @@ impl BleWorker {
 
             let discovery_future = Self::find_characteristic(&device);
             match tokio::time::timeout(CONNECT_TIMEOUT, discovery_future).await {
-                Ok(Ok((characteristic, write_mode))) => {
+                Ok(Ok((characteristic, write_mode, family))) => {
                     let _ = internal_tx
                         .send(WorkerEvent::Connected {
                             generation,
@@ -633,6 +657,7 @@ impl BleWorker {
                             characteristic,
                             write_mode,
                             name,
+                            family,
                         })
                         .await;
                 }
@@ -662,48 +687,83 @@ impl BleWorker {
 
     async fn find_characteristic(
         device: &Device,
-    ) -> Result<(Characteristic, WriteMode), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(Characteristic, WriteMode, ProtocolFamily), Box<dyn std::error::Error + Send + Sync>>
+    {
         let services = device.services().await?;
-        for service in services {
+
+        // Priority 1: Check for FFF0 service and FFF3 write characteristic (MELK / ELK-BLEDOM)
+        for service in &services {
             let service_uuid = service.uuid().await?;
-            let characteristics = service.characteristics().await?;
-            debug!(
-                "GATT service uuid={service_uuid} characteristic_count={}",
-                characteristics.len()
-            );
-
-            if service_uuid != SERVICE_UUID {
-                continue;
-            }
-
-            for characteristic in characteristics {
-                let uuid = characteristic.uuid().await?;
-                let flags = characteristic.flags().await?;
-                debug!("GATT characteristic uuid={uuid} flags={flags:?}");
-
-                if uuid != CHAR_UUID {
-                    continue;
+            if service_uuid == FFF0_SERVICE_UUID {
+                let characteristics = service.characteristics().await?;
+                for characteristic in characteristics {
+                    let uuid = characteristic.uuid().await?;
+                    if uuid == FFF3_CHAR_UUID {
+                        let flags = characteristic.flags().await?;
+                        let write_mode = if flags.write_without_response {
+                            WriteMode::WithoutResponse
+                        } else if flags.write {
+                            WriteMode::WithResponse
+                        } else {
+                            continue;
+                        };
+                        return Ok((characteristic, write_mode, ProtocolFamily::ElkBledom));
+                    }
                 }
-
-                // ponytail: Choose WriteMode based on characteristic flags.
-                // Write-without-response is preferred for low-latency streaming (effects, music),
-                // while WriteWithResponse is used as a fallback if the peripheral requires it.
-                // Note: GATT write acknowledgment confirms reception by the controller Bluetooth MCU,
-                // not physical LED luminescence which depends on MCU execution and strip power.
-                let write_mode = if flags.write_without_response {
-                    WriteMode::WithoutResponse
-                } else if flags.write {
-                    WriteMode::WithResponse
-                } else {
-                    return Err(
-                        "FFE1 has neither write nor write-without-response capability".into(),
-                    );
-                };
-                return Ok((characteristic, write_mode));
             }
         }
 
-        Err("expected service FFE0 and writable characteristic FFE1 were not found".into())
+        // Priority 2: Check for FFE0 service and FFE1 write characteristic (LEDDMX)
+        for service in &services {
+            let service_uuid = service.uuid().await?;
+            if service_uuid == FFE0_SERVICE_UUID {
+                let characteristics = service.characteristics().await?;
+                for characteristic in characteristics {
+                    let uuid = characteristic.uuid().await?;
+                    if uuid == FFE1_CHAR_UUID {
+                        let flags = characteristic.flags().await?;
+                        let write_mode = if flags.write_without_response {
+                            WriteMode::WithoutResponse
+                        } else if flags.write {
+                            WriteMode::WithResponse
+                        } else {
+                            continue;
+                        };
+                        return Ok((characteristic, write_mode, ProtocolFamily::Leddmdx));
+                    }
+                }
+            }
+        }
+
+        // Priority 3: Check for any writable characteristic under FFF0 or FFE0
+        for service in &services {
+            let service_uuid = service.uuid().await?;
+            let family = if service_uuid == FFF0_SERVICE_UUID {
+                ProtocolFamily::ElkBledom
+            } else if service_uuid == FFE0_SERVICE_UUID {
+                ProtocolFamily::Leddmdx
+            } else {
+                continue;
+            };
+
+            let characteristics = service.characteristics().await?;
+            for characteristic in characteristics {
+                let flags = characteristic.flags().await?;
+                if flags.write_without_response || flags.write {
+                    let write_mode = if flags.write_without_response {
+                        WriteMode::WithoutResponse
+                    } else {
+                        WriteMode::WithResponse
+                    };
+                    return Ok((characteristic, write_mode, family));
+                }
+            }
+        }
+
+        Err(
+            "No compatible writable GATT characteristic found (checked FFF0/FFF3 and FFE0/FFE1)"
+                .into(),
+        )
     }
 
     async fn start_connection_monitor(&mut self, device: Device, generation: u64) {
@@ -890,6 +950,9 @@ mod tests {
 
     #[test]
     fn test_is_target_name() {
+        assert!(is_target_name("MELK-OA10   45"));
+        assert!(is_target_name("ELK-BLEDOM"));
+        assert!(is_target_name("elk-bledom-01"));
         assert!(is_target_name("LEDDMX-03-A1B2"));
         assert!(is_target_name("LEDDMX"));
         assert!(is_target_name("leddmx-test"));

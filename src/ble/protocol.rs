@@ -109,13 +109,51 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtocolFamily {
+    #[default]
+    Leddmdx,
+    ElkBledom,
+}
+
+impl ProtocolFamily {
+    #[allow(dead_code)]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Leddmdx => "LEDDMX (0x7B)",
+            Self::ElkBledom => "ELK / MELK (0x7E)",
+        }
+    }
+}
+
 pub struct Protocol {
     color_order: ColorOrder,
+    family: ProtocolFamily,
 }
 
 impl Protocol {
     pub fn new(color_order: ColorOrder) -> Self {
-        Self { color_order }
+        Self {
+            color_order,
+            family: ProtocolFamily::default(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_family(color_order: ColorOrder, family: ProtocolFamily) -> Self {
+        Self {
+            color_order,
+            family,
+        }
+    }
+
+    pub fn set_family(&mut self, family: ProtocolFamily) {
+        self.family = family;
+    }
+
+    #[allow(dead_code)]
+    pub fn family(&self) -> ProtocolFamily {
+        self.family
     }
 
     pub fn set_color_order(&mut self, order: ColorOrder) {
@@ -128,26 +166,48 @@ impl Protocol {
     }
 
     pub fn encode(&self, cmd: &Command) -> Result<[u8; 9], ProtocolError> {
-        match cmd {
-            Command::StaticColor { r, g, b } => {
-                let (c1, c2, c3) = self.color_order.reorder(*r, *g, *b);
-                Ok([0x7B, 0xFF, 0x07, c1, c2, c3, 0x00, 0xFF, 0xBF])
-            }
-            Command::PowerOn => Ok([0x7B, 0xFF, 0x04, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]),
-            Command::PowerOff => Ok([0x7B, 0xFF, 0x04, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]),
-            Command::Brightness(pct) => {
-                if *pct > 100 {
-                    return Err(ProtocolError::InvalidBrightness(*pct));
+        match self.family {
+            ProtocolFamily::Leddmdx => match cmd {
+                Command::StaticColor { r, g, b } => {
+                    let (c1, c2, c3) = self.color_order.reorder(*r, *g, *b);
+                    Ok([0x7B, 0xFF, 0x07, c1, c2, c3, 0x00, 0xFF, 0xBF])
                 }
-                let scaled = ((*pct as u32) * 32 / 100) as u8;
-                Ok([0x7B, 0xFF, 0x01, scaled, *pct, 0x00, 0xFF, 0xFF, 0xBF])
-            }
-            Command::Pattern(idx) => {
-                if *idx > 210 {
-                    return Err(ProtocolError::InvalidPattern(*idx));
+                Command::PowerOn => Ok([0x7B, 0xFF, 0x04, 0x03, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]),
+                Command::PowerOff => Ok([0x7B, 0xFF, 0x04, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF]),
+                Command::Brightness(pct) => {
+                    if *pct > 100 {
+                        return Err(ProtocolError::InvalidBrightness(*pct));
+                    }
+                    let scaled = ((*pct as u32) * 32 / 100) as u8;
+                    Ok([0x7B, 0xFF, 0x01, scaled, *pct, 0x00, 0xFF, 0xFF, 0xBF])
                 }
-                Ok([0x7B, 0xFF, 0x03, *idx, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF])
-            }
+                Command::Pattern(idx) => {
+                    if *idx > 210 {
+                        return Err(ProtocolError::InvalidPattern(*idx));
+                    }
+                    Ok([0x7B, 0xFF, 0x03, *idx, 0xFF, 0xFF, 0xFF, 0xFF, 0xBF])
+                }
+            },
+            ProtocolFamily::ElkBledom => match cmd {
+                Command::StaticColor { r, g, b } => {
+                    let (c1, c2, c3) = self.color_order.reorder(*r, *g, *b);
+                    Ok([0x7E, 0x07, 0x05, 0x03, c1, c2, c3, 0x10, 0xEF])
+                }
+                Command::PowerOn => Ok([0x7E, 0x04, 0x04, 0xF0, 0x00, 0x01, 0xFF, 0x00, 0xEF]),
+                Command::PowerOff => Ok([0x7E, 0x04, 0x04, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEF]),
+                Command::Brightness(pct) => {
+                    if *pct > 100 {
+                        return Err(ProtocolError::InvalidBrightness(*pct));
+                    }
+                    Ok([0x7E, 0x04, 0x01, *pct, 0x01, 0xFF, 0xFF, 0x00, 0xEF])
+                }
+                Command::Pattern(idx) => {
+                    if *idx > 210 {
+                        return Err(ProtocolError::InvalidPattern(*idx));
+                    }
+                    Ok([0x7E, 0x05, 0x03, *idx, 0x06, 0xFF, 0xFF, 0x00, 0xEF])
+                }
+            },
         }
     }
 }
@@ -277,6 +337,37 @@ mod tests {
         assert_eq!(
             proto.encode(&Command::Pattern(211)),
             Err(ProtocolError::InvalidPattern(211))
+        );
+    }
+
+    #[test]
+    fn test_elkbledom_frames() {
+        let proto = Protocol::with_family(ColorOrder::Rgb, ProtocolFamily::ElkBledom);
+        assert_eq!(
+            proto
+                .encode(&Command::StaticColor {
+                    r: 128,
+                    g: 64,
+                    b: 32
+                })
+                .unwrap(),
+            [0x7E, 0x07, 0x05, 0x03, 128, 64, 32, 0x10, 0xEF]
+        );
+        assert_eq!(
+            proto.encode(&Command::PowerOn).unwrap(),
+            [0x7E, 0x04, 0x04, 0xF0, 0x00, 0x01, 0xFF, 0x00, 0xEF]
+        );
+        assert_eq!(
+            proto.encode(&Command::PowerOff).unwrap(),
+            [0x7E, 0x04, 0x04, 0x00, 0x00, 0x00, 0xFF, 0x00, 0xEF]
+        );
+        assert_eq!(
+            proto.encode(&Command::Brightness(75)).unwrap(),
+            [0x7E, 0x04, 0x01, 75, 0x01, 0xFF, 0xFF, 0x00, 0xEF]
+        );
+        assert_eq!(
+            proto.encode(&Command::Pattern(16)).unwrap(),
+            [0x7E, 0x05, 0x03, 16, 0x06, 0xFF, 0xFF, 0x00, 0xEF]
         );
     }
 }
